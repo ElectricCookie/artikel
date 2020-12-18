@@ -10,7 +10,7 @@
     "build": "webpack -p",
     "html": "node ./dist/render.js",
     "clean": "rm -rf ./dist/",
-    "render": "npm run build && npm run html && npm run clear"
+    "render": "npm run build && npm run html && npm run clean"
   },
   "repository": {
     "type": "git",

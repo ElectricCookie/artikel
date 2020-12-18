@@ -16,8 +16,20 @@ const Wrapper = styled.body`
     font-weight: bold;
   }
   font-family: "Source Sans Pro", sans-serif;
-  background: #000;
-  color: #ffffff;
+  @media (prefers-color-scheme: dark) {
+    background: #1d2d50;
+    color: #ffffff;
+    a{
+      color: #fcdab7;
+    }
+  }
+
+  @media (prefers-color-scheme: light) {
+    background: #fafafa;
+    color: #333;
+  }
+
+
   font-size: 12px;
   line-height: 130%;
 `;

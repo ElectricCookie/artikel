@@ -3,7 +3,6 @@ import renderItem from "../renderTree";
 import styled from "styled-components";
 
 const H2Wrapper = styled.h2`
-  color: #48ffc2;
 `;
 const H2 = ({ text, classes, children }) => {
   const slug = text.trim().split(" ").slice(0, 3).join("-");

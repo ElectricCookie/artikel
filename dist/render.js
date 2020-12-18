@@ -7264,7 +7264,7 @@ var dt_Dt = function Dt(_ref) {
 /* harmony default export */ var dt = (dt_Dt);
 // CONCATENATED MODULE: ./src/components/H1.js
 function H1_templateObject() {
-  var data = H1_taggedTemplateLiteral(["\n  color: #009fff;\n"]);
+  var data = H1_taggedTemplateLiteral(["\n\n"]);
 
   H1_templateObject = function _templateObject() {
     return data;
@@ -7300,7 +7300,7 @@ var H1_H1 = function H1(_ref) {
 /* harmony default export */ var components_H1 = (H1_H1);
 // CONCATENATED MODULE: ./src/components/H2.js
 function H2_templateObject() {
-  var data = H2_taggedTemplateLiteral(["\n  color: #48ffc2;\n"]);
+  var data = H2_taggedTemplateLiteral(["\n"]);
 
   H2_templateObject = function _templateObject() {
     return data;
@@ -7435,7 +7435,7 @@ var P_P = function P(_ref) {
 /* harmony default export */ var components_P = (P_P);
 // CONCATENATED MODULE: ./src/components/Page.js
 function Page_templateObject() {
-  var data = Page_taggedTemplateLiteral(["\n  width: 210mm;\n  margin: 0 auto;\n  background: #0c1011;\n  min-height: 297mm;\n  padding: 2rem;\n  @media (screen) {\n    box-shadow: 0 0 60px rgba(0, 0, 0, 0.2);\n  }\n"]);
+  var data = Page_taggedTemplateLiteral(["\n  width: 210mm;\n  margin: 0 auto;\n  @media (prefers-color-scheme: dark) {\n    background: #133b5c;\n    color: #ffffff;\n  }\n\n  @media (prefers-color-scheme: light) {\n    background: #fff;\n    color: #333;\n  }\n  min-height: 297mm;\n  padding: 2rem;\n  @media only screen{\n    border-radius: 8px;\n    box-shadow: 0 0 60px rgba(0, 0, 0, 0.2);\n  }\n"]);
 
   Page_templateObject = function _templateObject() {
     return data;
@@ -7632,7 +7632,7 @@ var renderTree_renderItem = function renderItem(_ref) {
 /* harmony default export */ var renderTree = (renderTree_renderItem);
 // CONCATENATED MODULE: ./src/App.js
 function App_templateObject() {
-  var data = App_taggedTemplateLiteral(["\n  h1,\n  h2,\n  h3,\n  h4,\n  h5,\n  h6 {\n    font-family: \"Libre Baskerville\", serif;\n    font-weight: bold;\n  }\n  font-family: \"Source Sans Pro\", sans-serif;\n  background: #000;\n  color: #ffffff;\n  font-size: 12px;\n  line-height: 130%;\n"]);
+  var data = App_taggedTemplateLiteral(["\n  h1,\n  h2,\n  h3,\n  h4,\n  h5,\n  h6 {\n    font-family: \"Libre Baskerville\", serif;\n    font-weight: bold;\n  }\n  font-family: \"Source Sans Pro\", sans-serif;\n  @media (prefers-color-scheme: dark) {\n    background: #1d2d50;\n    color: #ffffff;\n    a{\n      color: #fcdab7;\n    }\n  }\n\n  @media (prefers-color-scheme: light) {\n    background: #fafafa;\n    color: #333;\n  }\n\n\n  font-size: 12px;\n  line-height: 130%;\n"]);
 
   App_templateObject = function _templateObject() {
     return data;

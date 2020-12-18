@@ -1,2 +1,10 @@
 page 
-    h1 Hey
+	h1 Hey
+		small you
+	p This is an example page 
+
+	h2 This might be the dumbest thing ever 
+	ul 
+		li but 
+		li whatever
+

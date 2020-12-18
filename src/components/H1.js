@@ -3,7 +3,7 @@ import renderItem from "../renderTree";
 import styled from "styled-components";
 
 const H1Wrapper = styled.h1`
-  color: #009fff;
+
 `;
 
 const H1 = ({ text, classes, children }) => {

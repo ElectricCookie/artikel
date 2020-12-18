@@ -5,10 +5,19 @@ import renderItem from "../renderTree";
 const PageWrapper = styled.div`
   width: 210mm;
   margin: 0 auto;
-  background: #0c1011;
+  @media (prefers-color-scheme: dark) {
+    background: #133b5c;
+    color: #ffffff;
+  }
+
+  @media (prefers-color-scheme: light) {
+    background: #fff;
+    color: #333;
+  }
   min-height: 297mm;
   padding: 2rem;
-  @media (screen) {
+  @media only screen{
+    border-radius: 8px;
     box-shadow: 0 0 60px rgba(0, 0, 0, 0.2);
   }
 `;
