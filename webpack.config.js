@@ -1,6 +1,5 @@
 const webpack = require("webpack");
 const path = require("path");
-const MiniCssExtractPlugin = require("mini-css-extract-plugin");
 
 const staticConfig = {
   target: "node",
@@ -39,31 +38,6 @@ const staticConfig = {
           loader: "babel-loader",
         },
       },
-
-      {
-        test: /module\.css$/,
-        include: path.resolve(__dirname, "../"),
-        use: [
-          {
-            loader: MiniCssExtractPlugin.loader,
-            options: {
-              publicPath: "../",
-            },
-          },
-          {
-            loader: "css-loader",
-            options: {
-              url: false,
-              modules: true,
-              localIdentName: "[local]--[hash:base64:5]",
-            },
-          },
-          {
-            loader: "postcss-loader",
-          },
-        ],
-      },
-
       {
         exclude: /\.(js|css|html|json|svg)$/i,
         loader: "file-loader",
@@ -71,12 +45,6 @@ const staticConfig = {
       },
     ],
   },
-
-  plugins: [
-    new MiniCssExtractPlugin({
-      filename: "static.css",
-    }),
-  ],
 };
 
 module.exports = [staticConfig];

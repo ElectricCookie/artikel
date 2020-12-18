@@ -13,8 +13,17 @@ if (!fs.existsSync(OUT_DIR)) {
   fs.mkdirSync(OUT_DIR);
 }
 
-glob(path.join(process.cwd(), "./**/*.note"), {}, (err, files) => {
+console.log(chalk.blueBright("👋🏻 Heyo. Artikel is looking for your notes..."));
+console.log(chalk.green("Looking for *.art"));
+
+
+glob(path.join(process.cwd(), "./*.art"), {}, (err, files) => {
+  if(err){
+    console.log(chalk.redBright("😫 Oh no something went wrong: "+err));
+    return;
+  }
   files.forEach((item) => {
+    console.log(chalk.dim("✍🏻 Converting note: "+item));
     var content = fs.readFileSync(item).toString();
     const sheet = new ServerStyleSheet();
     var output = ReactDOMServer.renderToStaticMarkup(
@@ -23,8 +32,9 @@ glob(path.join(process.cwd(), "./**/*.note"), {}, (err, files) => {
     output += sheet.getStyleTags();
 
     fs.writeFileSync(
-      path.join(OUT_DIR, path.basename(item, "note") + "html"),
+      path.join(OUT_DIR, path.basename(item, "art") + "html"),
       output
     );
+    console.log(chalk.dim("👍 Converting done: "+item));
   });
 });
