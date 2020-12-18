@@ -7672,7 +7672,7 @@ function wrappy (fn, cb) {
 /***/ ((module) => {
 
 "use strict";
-module.exports = {"i8":"0.0.4"};
+module.exports = {"i8":"0.0.6"};
 
 /***/ }),
 
@@ -9586,10 +9586,6 @@ var glob_default = /*#__PURE__*/__webpack_require__.n(glob);
 commander.program.version(__webpack_require__(306)/* .version */ .i8);
 commander.program.command("img").option("-C, --compress", "compress", "true");
 commander.program.command("render [path...]").description("Render files").option("-O, --output <path>", "change the output directory", "./output").option("-F, --force", "force a re-render", "false").action(function (files, options) {
-  console.log(process.argv);
-  console.log(files);
-  console.log(options.output);
-  console.log(options.force);
   var OUT_DIR = external_path_default().join(process.cwd(), options.output);
 
   if (!external_fs_default().existsSync(OUT_DIR)) {
