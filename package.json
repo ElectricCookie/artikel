@@ -34,12 +34,12 @@
     "babel-loader": "^8.2.2",
     "chalk": "^4.1.0",
     "clipboardy": "^2.3.0",
+    "commander": "^6.2.1",
     "express": "^4.17.1",
     "file-loader": "^6.2.0",
     "glob": "^7.1.6",
     "react": "^17.0.1",
     "react-dom": "^17.0.1",
     "styled-components": "^5.2.1"
-  
   }
 }

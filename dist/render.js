@@ -81,7 +81,7 @@
 /******/
 /******/
 /******/ 	// Load entry module and return exports
-/******/ 	return __webpack_require__(__webpack_require__.s = 43);
+/******/ 	return __webpack_require__(__webpack_require__.s = 46);
 /******/ })
 /************************************************************************/
 /******/ ([
@@ -92,7 +92,7 @@
 
 
 if (true) {
-  module.exports = __webpack_require__(30);
+  module.exports = __webpack_require__(33);
 } else {}
 
 
@@ -114,12 +114,12 @@ module.exports = require("fs");
 
 "use strict";
 
-const ansiStyles = __webpack_require__(20);
-const {stdout: stdoutColor, stderr: stderrColor} = __webpack_require__(25);
+const ansiStyles = __webpack_require__(22);
+const {stdout: stdoutColor, stderr: stderrColor} = __webpack_require__(27);
 const {
 	stringReplaceAll,
 	stringEncaseCRLFWithFirstIndex
-} = __webpack_require__(28);
+} = __webpack_require__(30);
 
 const {isArray} = Array;
 
@@ -328,7 +328,7 @@ const chalkTag = (chalk, ...strings) => {
 	}
 
 	if (template === undefined) {
-		template = __webpack_require__(29);
+		template = __webpack_require__(31);
 	}
 
 	return template(chalk, parts.join(''));
@@ -348,16 +348,1903 @@ module.exports = chalk;
 /* 4 */
 /***/ (function(module, exports, __webpack_require__) {
 
-"use strict";
+/**
+ * Module dependencies.
+ */
 
+const EventEmitter = __webpack_require__(12).EventEmitter;
+const spawn = __webpack_require__(32).spawn;
+const path = __webpack_require__(1);
+const fs = __webpack_require__(2);
 
-if (true) {
-  module.exports = __webpack_require__(31);
-} else {}
+// @ts-check
+
+class Option {
+  /**
+   * Initialize a new `Option` with the given `flags` and `description`.
+   *
+   * @param {string} flags
+   * @param {string} description
+   * @api public
+   */
+
+  constructor(flags, description) {
+    this.flags = flags;
+    this.required = flags.includes('<'); // A value must be supplied when the option is specified.
+    this.optional = flags.includes('['); // A value is optional when the option is specified.
+    // variadic test ignores <value,...> et al which might be used to describe custom splitting of single argument
+    this.variadic = /\w\.\.\.[>\]]$/.test(flags); // The option can take multiple values.
+    this.mandatory = false; // The option must have a value after parsing, which usually means it must be specified on command line.
+    const optionFlags = _parseOptionFlags(flags);
+    this.short = optionFlags.shortFlag;
+    this.long = optionFlags.longFlag;
+    this.negate = false;
+    if (this.long) {
+      this.negate = this.long.startsWith('--no-');
+    }
+    this.description = description || '';
+    this.defaultValue = undefined;
+  }
+
+  /**
+   * Return option name.
+   *
+   * @return {string}
+   * @api private
+   */
+
+  name() {
+    if (this.long) {
+      return this.long.replace(/^--/, '');
+    }
+    return this.short.replace(/^-/, '');
+  };
+
+  /**
+   * Return option name, in a camelcase format that can be used
+   * as a object attribute key.
+   *
+   * @return {string}
+   * @api private
+   */
+
+  attributeName() {
+    return camelcase(this.name().replace(/^no-/, ''));
+  };
+
+  /**
+   * Check if `arg` matches the short or long flag.
+   *
+   * @param {string} arg
+   * @return {boolean}
+   * @api private
+   */
+
+  is(arg) {
+    return this.short === arg || this.long === arg;
+  };
+}
+
+/**
+ * CommanderError class
+ * @class
+ */
+class CommanderError extends Error {
+  /**
+   * Constructs the CommanderError class
+   * @param {number} exitCode suggested exit code which could be used with process.exit
+   * @param {string} code an id string representing the error
+   * @param {string} message human-readable description of the error
+   * @constructor
+   */
+  constructor(exitCode, code, message) {
+    super(message);
+    // properly capture stack trace in Node.js
+    Error.captureStackTrace(this, this.constructor);
+    this.name = this.constructor.name;
+    this.code = code;
+    this.exitCode = exitCode;
+    this.nestedError = undefined;
+  }
+}
+
+class Command extends EventEmitter {
+  /**
+   * Initialize a new `Command`.
+   *
+   * @param {string} [name]
+   * @api public
+   */
+
+  constructor(name) {
+    super();
+    this.commands = [];
+    this.options = [];
+    this.parent = null;
+    this._allowUnknownOption = false;
+    this._args = [];
+    this.rawArgs = null;
+    this._scriptPath = null;
+    this._name = name || '';
+    this._optionValues = {};
+    this._storeOptionsAsProperties = true; // backwards compatible by default
+    this._storeOptionsAsPropertiesCalled = false;
+    this._passCommandToAction = true; // backwards compatible by default
+    this._actionResults = [];
+    this._actionHandler = null;
+    this._executableHandler = false;
+    this._executableFile = null; // custom name for executable
+    this._defaultCommandName = null;
+    this._exitCallback = null;
+    this._aliases = [];
+    this._combineFlagAndOptionalValue = true;
+
+    this._hidden = false;
+    this._hasHelpOption = true;
+    this._helpFlags = '-h, --help';
+    this._helpDescription = 'display help for command';
+    this._helpShortFlag = '-h';
+    this._helpLongFlag = '--help';
+    this._hasImplicitHelpCommand = undefined; // Deliberately undefined, not decided whether true or false
+    this._helpCommandName = 'help';
+    this._helpCommandnameAndArgs = 'help [command]';
+    this._helpCommandDescription = 'display help for command';
+  }
+
+  /**
+   * Define a command.
+   *
+   * There are two styles of command: pay attention to where to put the description.
+   *
+   * Examples:
+   *
+   *      // Command implemented using action handler (description is supplied separately to `.command`)
+   *      program
+   *        .command('clone <source> [destination]')
+   *        .description('clone a repository into a newly created directory')
+   *        .action((source, destination) => {
+   *          console.log('clone command called');
+   *        });
+   *
+   *      // Command implemented using separate executable file (description is second parameter to `.command`)
+   *      program
+   *        .command('start <service>', 'start named service')
+   *        .command('stop [service]', 'stop named service, or all if no name supplied');
+   *
+   * @param {string} nameAndArgs - command name and arguments, args are `<required>` or `[optional]` and last may also be `variadic...`
+   * @param {Object|string} [actionOptsOrExecDesc] - configuration options (for action), or description (for executable)
+   * @param {Object} [execOpts] - configuration options (for executable)
+   * @return {Command} returns new command for action handler, or `this` for executable command
+   * @api public
+   */
+
+  command(nameAndArgs, actionOptsOrExecDesc, execOpts) {
+    let desc = actionOptsOrExecDesc;
+    let opts = execOpts;
+    if (typeof desc === 'object' && desc !== null) {
+      opts = desc;
+      desc = null;
+    }
+    opts = opts || {};
+    const args = nameAndArgs.split(/ +/);
+    const cmd = this.createCommand(args.shift());
+
+    if (desc) {
+      cmd.description(desc);
+      cmd._executableHandler = true;
+    }
+    if (opts.isDefault) this._defaultCommandName = cmd._name;
+
+    cmd._hidden = !!(opts.noHelp || opts.hidden);
+    cmd._hasHelpOption = this._hasHelpOption;
+    cmd._helpFlags = this._helpFlags;
+    cmd._helpDescription = this._helpDescription;
+    cmd._helpShortFlag = this._helpShortFlag;
+    cmd._helpLongFlag = this._helpLongFlag;
+    cmd._helpCommandName = this._helpCommandName;
+    cmd._helpCommandnameAndArgs = this._helpCommandnameAndArgs;
+    cmd._helpCommandDescription = this._helpCommandDescription;
+    cmd._exitCallback = this._exitCallback;
+    cmd._storeOptionsAsProperties = this._storeOptionsAsProperties;
+    cmd._passCommandToAction = this._passCommandToAction;
+    cmd._combineFlagAndOptionalValue = this._combineFlagAndOptionalValue;
+
+    cmd._executableFile = opts.executableFile || null; // Custom name for executable file, set missing to null to match constructor
+    this.commands.push(cmd);
+    cmd._parseExpectedArgs(args);
+    cmd.parent = this;
+
+    if (desc) return this;
+    return cmd;
+  };
+
+  /**
+   * Factory routine to create a new unattached command.
+   *
+   * See .command() for creating an attached subcommand, which uses this routine to
+   * create the command. You can override createCommand to customise subcommands.
+   *
+   * @param {string} [name]
+   * @return {Command} new command
+   * @api public
+   */
+
+  createCommand(name) {
+    return new Command(name);
+  };
+
+  /**
+   * Add a prepared subcommand.
+   *
+   * See .command() for creating an attached subcommand which inherits settings from its parent.
+   *
+   * @param {Command} cmd - new subcommand
+   * @param {Object} [opts] - configuration options
+   * @return {Command} `this` command for chaining
+   * @api public
+   */
+
+  addCommand(cmd, opts) {
+    if (!cmd._name) throw new Error('Command passed to .addCommand() must have a name');
+
+    // To keep things simple, block automatic name generation for deeply nested executables.
+    // Fail fast and detect when adding rather than later when parsing.
+    function checkExplicitNames(commandArray) {
+      commandArray.forEach((cmd) => {
+        if (cmd._executableHandler && !cmd._executableFile) {
+          throw new Error(`Must specify executableFile for deeply nested executable: ${cmd.name()}`);
+        }
+        checkExplicitNames(cmd.commands);
+      });
+    }
+    checkExplicitNames(cmd.commands);
+
+    opts = opts || {};
+    if (opts.isDefault) this._defaultCommandName = cmd._name;
+    if (opts.noHelp || opts.hidden) cmd._hidden = true; // modifying passed command due to existing implementation
+
+    this.commands.push(cmd);
+    cmd.parent = this;
+    return this;
+  };
+
+  /**
+   * Define argument syntax for the command.
+   *
+   * @api public
+   */
+
+  arguments(desc) {
+    return this._parseExpectedArgs(desc.split(/ +/));
+  };
+
+  /**
+   * Override default decision whether to add implicit help command.
+   *
+   *    addHelpCommand() // force on
+   *    addHelpCommand(false); // force off
+   *    addHelpCommand('help [cmd]', 'display help for [cmd]'); // force on with custom details
+   *
+   * @return {Command} `this` command for chaining
+   * @api public
+   */
+
+  addHelpCommand(enableOrNameAndArgs, description) {
+    if (enableOrNameAndArgs === false) {
+      this._hasImplicitHelpCommand = false;
+    } else {
+      this._hasImplicitHelpCommand = true;
+      if (typeof enableOrNameAndArgs === 'string') {
+        this._helpCommandName = enableOrNameAndArgs.split(' ')[0];
+        this._helpCommandnameAndArgs = enableOrNameAndArgs;
+      }
+      this._helpCommandDescription = description || this._helpCommandDescription;
+    }
+    return this;
+  };
+
+  /**
+   * @return {boolean}
+   * @api private
+   */
+
+  _lazyHasImplicitHelpCommand() {
+    if (this._hasImplicitHelpCommand === undefined) {
+      this._hasImplicitHelpCommand = this.commands.length && !this._actionHandler && !this._findCommand('help');
+    }
+    return this._hasImplicitHelpCommand;
+  };
+
+  /**
+   * Parse expected `args`.
+   *
+   * For example `["[type]"]` becomes `[{ required: false, name: 'type' }]`.
+   *
+   * @param {Array} args
+   * @return {Command} `this` command for chaining
+   * @api private
+   */
+
+  _parseExpectedArgs(args) {
+    if (!args.length) return;
+    args.forEach((arg) => {
+      const argDetails = {
+        required: false,
+        name: '',
+        variadic: false
+      };
+
+      switch (arg[0]) {
+        case '<':
+          argDetails.required = true;
+          argDetails.name = arg.slice(1, -1);
+          break;
+        case '[':
+          argDetails.name = arg.slice(1, -1);
+          break;
+      }
+
+      if (argDetails.name.length > 3 && argDetails.name.slice(-3) === '...') {
+        argDetails.variadic = true;
+        argDetails.name = argDetails.name.slice(0, -3);
+      }
+      if (argDetails.name) {
+        this._args.push(argDetails);
+      }
+    });
+    this._args.forEach((arg, i) => {
+      if (arg.variadic && i < this._args.length - 1) {
+        throw new Error(`only the last argument can be variadic '${arg.name}'`);
+      }
+    });
+    return this;
+  };
+
+  /**
+   * Register callback to use as replacement for calling process.exit.
+   *
+   * @param {Function} [fn] optional callback which will be passed a CommanderError, defaults to throwing
+   * @return {Command} `this` command for chaining
+   * @api public
+   */
+
+  exitOverride(fn) {
+    if (fn) {
+      this._exitCallback = fn;
+    } else {
+      this._exitCallback = (err) => {
+        if (err.code !== 'commander.executeSubCommandAsync') {
+          throw err;
+        } else {
+          // Async callback from spawn events, not useful to throw.
+        }
+      };
+    }
+    return this;
+  };
+
+  /**
+   * Call process.exit, and _exitCallback if defined.
+   *
+   * @param {number} exitCode exit code for using with process.exit
+   * @param {string} code an id string representing the error
+   * @param {string} message human-readable description of the error
+   * @return never
+   * @api private
+   */
+
+  _exit(exitCode, code, message) {
+    if (this._exitCallback) {
+      this._exitCallback(new CommanderError(exitCode, code, message));
+      // Expecting this line is not reached.
+    }
+    process.exit(exitCode);
+  };
+
+  /**
+   * Register callback `fn` for the command.
+   *
+   * Examples:
+   *
+   *      program
+   *        .command('help')
+   *        .description('display verbose help')
+   *        .action(function() {
+   *           // output help here
+   *        });
+   *
+   * @param {Function} fn
+   * @return {Command} `this` command for chaining
+   * @api public
+   */
+
+  action(fn) {
+    const listener = (args) => {
+      // The .action callback takes an extra parameter which is the command or options.
+      const expectedArgsCount = this._args.length;
+      const actionArgs = args.slice(0, expectedArgsCount);
+      if (this._passCommandToAction) {
+        actionArgs[expectedArgsCount] = this;
+      } else {
+        actionArgs[expectedArgsCount] = this.opts();
+      }
+      // Add the extra arguments so available too.
+      if (args.length > expectedArgsCount) {
+        actionArgs.push(args.slice(expectedArgsCount));
+      }
+
+      const actionResult = fn.apply(this, actionArgs);
+      // Remember result in case it is async. Assume parseAsync getting called on root.
+      let rootCommand = this;
+      while (rootCommand.parent) {
+        rootCommand = rootCommand.parent;
+      }
+      rootCommand._actionResults.push(actionResult);
+    };
+    this._actionHandler = listener;
+    return this;
+  };
+
+  /**
+   * Internal routine to check whether there is a clash storing option value with a Command property.
+   *
+   * @param {Option} option
+   * @api private
+   */
+
+  _checkForOptionNameClash(option) {
+    if (!this._storeOptionsAsProperties || this._storeOptionsAsPropertiesCalled) {
+      // Storing options safely, or user has been explicit and up to them.
+      return;
+    }
+    // User may override help, and hard to tell if worth warning.
+    if (option.name() === 'help') {
+      return;
+    }
+
+    const commandProperty = this._getOptionValue(option.attributeName());
+    if (commandProperty === undefined) {
+      // no clash
+      return;
+    }
+
+    let foundClash = true;
+    if (option.negate) {
+      // It is ok if define foo before --no-foo.
+      const positiveLongFlag = option.long.replace(/^--no-/, '--');
+      foundClash = !this._findOption(positiveLongFlag);
+    } else if (option.long) {
+      const negativeLongFlag = option.long.replace(/^--/, '--no-');
+      foundClash = !this._findOption(negativeLongFlag);
+    }
+
+    if (foundClash) {
+      throw new Error(`option '${option.name()}' clashes with existing property '${option.attributeName()}' on Command
+- call storeOptionsAsProperties(false) to store option values safely,
+- or call storeOptionsAsProperties(true) to suppress this check,
+- or change option name
+
+Read more on https://git.io/JJc0W`);
+    }
+  };
+
+  /**
+   * Internal implementation shared by .option() and .requiredOption()
+   *
+   * @param {Object} config
+   * @param {string} flags
+   * @param {string} description
+   * @param {Function|*} [fn] - custom option processing function or default value
+   * @param {*} [defaultValue]
+   * @return {Command} `this` command for chaining
+   * @api private
+   */
+
+  _optionEx(config, flags, description, fn, defaultValue) {
+    const option = new Option(flags, description);
+    const oname = option.name();
+    const name = option.attributeName();
+    option.mandatory = !!config.mandatory;
+
+    this._checkForOptionNameClash(option);
+
+    // default as 3rd arg
+    if (typeof fn !== 'function') {
+      if (fn instanceof RegExp) {
+        // This is a bit simplistic (especially no error messages), and probably better handled by caller using custom option processing.
+        // No longer documented in README, but still present for backwards compatibility.
+        const regex = fn;
+        fn = (val, def) => {
+          const m = regex.exec(val);
+          return m ? m[0] : def;
+        };
+      } else {
+        defaultValue = fn;
+        fn = null;
+      }
+    }
+
+    // preassign default value for --no-*, [optional], <required>, or plain flag if boolean value
+    if (option.negate || option.optional || option.required || typeof defaultValue === 'boolean') {
+      // when --no-foo we make sure default is true, unless a --foo option is already defined
+      if (option.negate) {
+        const positiveLongFlag = option.long.replace(/^--no-/, '--');
+        defaultValue = this._findOption(positiveLongFlag) ? this._getOptionValue(name) : true;
+      }
+      // preassign only if we have a default
+      if (defaultValue !== undefined) {
+        this._setOptionValue(name, defaultValue);
+        option.defaultValue = defaultValue;
+      }
+    }
+
+    // register the option
+    this.options.push(option);
+
+    // when it's passed assign the value
+    // and conditionally invoke the callback
+    this.on('option:' + oname, (val) => {
+      const oldValue = this._getOptionValue(name);
+
+      // custom processing
+      if (val !== null && fn) {
+        val = fn(val, oldValue === undefined ? defaultValue : oldValue);
+      } else if (val !== null && option.variadic) {
+        if (oldValue === defaultValue || !Array.isArray(oldValue)) {
+          val = [val];
+        } else {
+          val = oldValue.concat(val);
+        }
+      }
+
+      // unassigned or boolean value
+      if (typeof oldValue === 'boolean' || typeof oldValue === 'undefined') {
+        // if no value, negate false, and we have a default, then use it!
+        if (val == null) {
+          this._setOptionValue(name, option.negate
+            ? false
+            : defaultValue || true);
+        } else {
+          this._setOptionValue(name, val);
+        }
+      } else if (val !== null) {
+        // reassign
+        this._setOptionValue(name, option.negate ? false : val);
+      }
+    });
+
+    return this;
+  };
+
+  /**
+   * Define option with `flags`, `description` and optional
+   * coercion `fn`.
+   *
+   * The `flags` string should contain both the short and long flags,
+   * separated by comma, a pipe or space. The following are all valid
+   * all will output this way when `--help` is used.
+   *
+   *    "-p, --pepper"
+   *    "-p|--pepper"
+   *    "-p --pepper"
+   *
+   * Examples:
+   *
+   *     // simple boolean defaulting to undefined
+   *     program.option('-p, --pepper', 'add pepper');
+   *
+   *     program.pepper
+   *     // => undefined
+   *
+   *     --pepper
+   *     program.pepper
+   *     // => true
+   *
+   *     // simple boolean defaulting to true (unless non-negated option is also defined)
+   *     program.option('-C, --no-cheese', 'remove cheese');
+   *
+   *     program.cheese
+   *     // => true
+   *
+   *     --no-cheese
+   *     program.cheese
+   *     // => false
+   *
+   *     // required argument
+   *     program.option('-C, --chdir <path>', 'change the working directory');
+   *
+   *     --chdir /tmp
+   *     program.chdir
+   *     // => "/tmp"
+   *
+   *     // optional argument
+   *     program.option('-c, --cheese [type]', 'add cheese [marble]');
+   *
+   * @param {string} flags
+   * @param {string} description
+   * @param {Function|*} [fn] - custom option processing function or default value
+   * @param {*} [defaultValue]
+   * @return {Command} `this` command for chaining
+   * @api public
+   */
+
+  option(flags, description, fn, defaultValue) {
+    return this._optionEx({}, flags, description, fn, defaultValue);
+  };
+
+  /**
+  * Add a required option which must have a value after parsing. This usually means
+  * the option must be specified on the command line. (Otherwise the same as .option().)
+  *
+  * The `flags` string should contain both the short and long flags, separated by comma, a pipe or space.
+  *
+  * @param {string} flags
+  * @param {string} description
+  * @param {Function|*} [fn] - custom option processing function or default value
+  * @param {*} [defaultValue]
+  * @return {Command} `this` command for chaining
+  * @api public
+  */
+
+  requiredOption(flags, description, fn, defaultValue) {
+    return this._optionEx({ mandatory: true }, flags, description, fn, defaultValue);
+  };
+
+  /**
+   * Alter parsing of short flags with optional values.
+   *
+   * Examples:
+   *
+   *    // for `.option('-f,--flag [value]'):
+   *    .combineFlagAndOptionalValue(true)  // `-f80` is treated like `--flag=80`, this is the default behaviour
+   *    .combineFlagAndOptionalValue(false) // `-fb` is treated like `-f -b`
+   *
+   * @param {Boolean} [arg] - if `true` or omitted, an optional value can be specified directly after the flag.
+   * @api public
+   */
+  combineFlagAndOptionalValue(arg) {
+    this._combineFlagAndOptionalValue = (arg === undefined) || arg;
+    return this;
+  };
+
+  /**
+   * Allow unknown options on the command line.
+   *
+   * @param {Boolean} [arg] - if `true` or omitted, no error will be thrown
+   * for unknown options.
+   * @api public
+   */
+  allowUnknownOption(arg) {
+    this._allowUnknownOption = (arg === undefined) || arg;
+    return this;
+  };
+
+  /**
+    * Whether to store option values as properties on command object,
+    * or store separately (specify false). In both cases the option values can be accessed using .opts().
+    *
+    * @param {boolean} value
+    * @return {Command} `this` command for chaining
+    * @api public
+    */
+
+  storeOptionsAsProperties(value) {
+    this._storeOptionsAsPropertiesCalled = true;
+    this._storeOptionsAsProperties = (value === undefined) || value;
+    if (this.options.length) {
+      throw new Error('call .storeOptionsAsProperties() before adding options');
+    }
+    return this;
+  };
+
+  /**
+    * Whether to pass command to action handler,
+    * or just the options (specify false).
+    *
+    * @param {boolean} value
+    * @return {Command} `this` command for chaining
+    * @api public
+    */
+
+  passCommandToAction(value) {
+    this._passCommandToAction = (value === undefined) || value;
+    return this;
+  };
+
+  /**
+   * Store option value
+   *
+   * @param {string} key
+   * @param {Object} value
+   * @api private
+   */
+
+  _setOptionValue(key, value) {
+    if (this._storeOptionsAsProperties) {
+      this[key] = value;
+    } else {
+      this._optionValues[key] = value;
+    }
+  };
+
+  /**
+   * Retrieve option value
+   *
+   * @param {string} key
+   * @return {Object} value
+   * @api private
+   */
+
+  _getOptionValue(key) {
+    if (this._storeOptionsAsProperties) {
+      return this[key];
+    }
+    return this._optionValues[key];
+  };
+
+  /**
+   * Parse `argv`, setting options and invoking commands when defined.
+   *
+   * The default expectation is that the arguments are from node and have the application as argv[0]
+   * and the script being run in argv[1], with user parameters after that.
+   *
+   * Examples:
+   *
+   *      program.parse(process.argv);
+   *      program.parse(); // implicitly use process.argv and auto-detect node vs electron conventions
+   *      program.parse(my-args, { from: 'user' }); // just user supplied arguments, nothing special about argv[0]
+   *
+   * @param {string[]} [argv] - optional, defaults to process.argv
+   * @param {Object} [parseOptions] - optionally specify style of options with from: node/user/electron
+   * @param {string} [parseOptions.from] - where the args are from: 'node', 'user', 'electron'
+   * @return {Command} `this` command for chaining
+   * @api public
+   */
+
+  parse(argv, parseOptions) {
+    if (argv !== undefined && !Array.isArray(argv)) {
+      throw new Error('first parameter to parse must be array or undefined');
+    }
+    parseOptions = parseOptions || {};
+
+    // Default to using process.argv
+    if (argv === undefined) {
+      argv = process.argv;
+      // @ts-ignore
+      if (process.versions && process.versions.electron) {
+        parseOptions.from = 'electron';
+      }
+    }
+    this.rawArgs = argv.slice();
+
+    // make it a little easier for callers by supporting various argv conventions
+    let userArgs;
+    switch (parseOptions.from) {
+      case undefined:
+      case 'node':
+        this._scriptPath = argv[1];
+        userArgs = argv.slice(2);
+        break;
+      case 'electron':
+        // @ts-ignore
+        if (process.defaultApp) {
+          this._scriptPath = argv[1];
+          userArgs = argv.slice(2);
+        } else {
+          userArgs = argv.slice(1);
+        }
+        break;
+      case 'user':
+        userArgs = argv.slice(0);
+        break;
+      default:
+        throw new Error(`unexpected parse option { from: '${parseOptions.from}' }`);
+    }
+    if (!this._scriptPath && process.mainModule) {
+      this._scriptPath = process.mainModule.filename;
+    }
+
+    // Guess name, used in usage in help.
+    this._name = this._name || (this._scriptPath && path.basename(this._scriptPath, path.extname(this._scriptPath)));
+
+    // Let's go!
+    this._parseCommand([], userArgs);
+
+    return this;
+  };
+
+  /**
+   * Parse `argv`, setting options and invoking commands when defined.
+   *
+   * Use parseAsync instead of parse if any of your action handlers are async. Returns a Promise.
+   *
+   * The default expectation is that the arguments are from node and have the application as argv[0]
+   * and the script being run in argv[1], with user parameters after that.
+   *
+   * Examples:
+   *
+   *      program.parseAsync(process.argv);
+   *      program.parseAsync(); // implicitly use process.argv and auto-detect node vs electron conventions
+   *      program.parseAsync(my-args, { from: 'user' }); // just user supplied arguments, nothing special about argv[0]
+   *
+   * @param {string[]} [argv]
+   * @param {Object} [parseOptions]
+   * @param {string} parseOptions.from - where the args are from: 'node', 'user', 'electron'
+   * @return {Promise}
+   * @api public
+   */
+
+  parseAsync(argv, parseOptions) {
+    this.parse(argv, parseOptions);
+    return Promise.all(this._actionResults).then(() => this);
+  };
+
+  /**
+   * Execute a sub-command executable.
+   *
+   * @api private
+   */
+
+  _executeSubCommand(subcommand, args) {
+    args = args.slice();
+    let launchWithNode = false; // Use node for source targets so do not need to get permissions correct, and on Windows.
+    const sourceExt = ['.js', '.ts', '.tsx', '.mjs'];
+
+    // Not checking for help first. Unlikely to have mandatory and executable, and can't robustly test for help flags in external command.
+    this._checkForMissingMandatoryOptions();
+
+    // Want the entry script as the reference for command name and directory for searching for other files.
+    let scriptPath = this._scriptPath;
+    // Fallback in case not set, due to how Command created or called.
+    if (!scriptPath && process.mainModule) {
+      scriptPath = process.mainModule.filename;
+    }
+
+    let baseDir;
+    try {
+      const resolvedLink = fs.realpathSync(scriptPath);
+      baseDir = path.dirname(resolvedLink);
+    } catch (e) {
+      baseDir = '.'; // dummy, probably not going to find executable!
+    }
+
+    // name of the subcommand, like `pm-install`
+    let bin = path.basename(scriptPath, path.extname(scriptPath)) + '-' + subcommand._name;
+    if (subcommand._executableFile) {
+      bin = subcommand._executableFile;
+    }
+
+    const localBin = path.join(baseDir, bin);
+    if (fs.existsSync(localBin)) {
+      // prefer local `./<bin>` to bin in the $PATH
+      bin = localBin;
+    } else {
+      // Look for source files.
+      sourceExt.forEach((ext) => {
+        if (fs.existsSync(`${localBin}${ext}`)) {
+          bin = `${localBin}${ext}`;
+        }
+      });
+    }
+    launchWithNode = sourceExt.includes(path.extname(bin));
+
+    let proc;
+    if (process.platform !== 'win32') {
+      if (launchWithNode) {
+        args.unshift(bin);
+        // add executable arguments to spawn
+        args = incrementNodeInspectorPort(process.execArgv).concat(args);
+
+        proc = spawn(process.argv[0], args, { stdio: 'inherit' });
+      } else {
+        proc = spawn(bin, args, { stdio: 'inherit' });
+      }
+    } else {
+      args.unshift(bin);
+      // add executable arguments to spawn
+      args = incrementNodeInspectorPort(process.execArgv).concat(args);
+      proc = spawn(process.execPath, args, { stdio: 'inherit' });
+    }
+
+    const signals = ['SIGUSR1', 'SIGUSR2', 'SIGTERM', 'SIGINT', 'SIGHUP'];
+    signals.forEach((signal) => {
+      // @ts-ignore
+      process.on(signal, () => {
+        if (proc.killed === false && proc.exitCode === null) {
+          proc.kill(signal);
+        }
+      });
+    });
+
+    // By default terminate process when spawned process terminates.
+    // Suppressing the exit if exitCallback defined is a bit messy and of limited use, but does allow process to stay running!
+    const exitCallback = this._exitCallback;
+    if (!exitCallback) {
+      proc.on('close', process.exit.bind(process));
+    } else {
+      proc.on('close', () => {
+        exitCallback(new CommanderError(process.exitCode || 0, 'commander.executeSubCommandAsync', '(close)'));
+      });
+    }
+    proc.on('error', (err) => {
+      // @ts-ignore
+      if (err.code === 'ENOENT') {
+        const executableMissing = `'${bin}' does not exist
+ - if '${subcommand._name}' is not meant to be an executable command, remove description parameter from '.command()' and use '.description()' instead
+ - if the default executable name is not suitable, use the executableFile option to supply a custom name`;
+        throw new Error(executableMissing);
+      // @ts-ignore
+      } else if (err.code === 'EACCES') {
+        throw new Error(`'${bin}' not executable`);
+      }
+      if (!exitCallback) {
+        process.exit(1);
+      } else {
+        const wrappedError = new CommanderError(1, 'commander.executeSubCommandAsync', '(error)');
+        wrappedError.nestedError = err;
+        exitCallback(wrappedError);
+      }
+    });
+
+    // Store the reference to the child process
+    this.runningCommand = proc;
+  };
+
+  /**
+   * @api private
+   */
+  _dispatchSubcommand(commandName, operands, unknown) {
+    const subCommand = this._findCommand(commandName);
+    if (!subCommand) this._helpAndError();
+
+    if (subCommand._executableHandler) {
+      this._executeSubCommand(subCommand, operands.concat(unknown));
+    } else {
+      subCommand._parseCommand(operands, unknown);
+    }
+  };
+
+  /**
+   * Process arguments in context of this command.
+   *
+   * @api private
+   */
+
+  _parseCommand(operands, unknown) {
+    const parsed = this.parseOptions(unknown);
+    operands = operands.concat(parsed.operands);
+    unknown = parsed.unknown;
+    this.args = operands.concat(unknown);
+
+    if (operands && this._findCommand(operands[0])) {
+      this._dispatchSubcommand(operands[0], operands.slice(1), unknown);
+    } else if (this._lazyHasImplicitHelpCommand() && operands[0] === this._helpCommandName) {
+      if (operands.length === 1) {
+        this.help();
+      } else {
+        this._dispatchSubcommand(operands[1], [], [this._helpLongFlag]);
+      }
+    } else if (this._defaultCommandName) {
+      outputHelpIfRequested(this, unknown); // Run the help for default command from parent rather than passing to default command
+      this._dispatchSubcommand(this._defaultCommandName, operands, unknown);
+    } else {
+      if (this.commands.length && this.args.length === 0 && !this._actionHandler && !this._defaultCommandName) {
+        // probably missing subcommand and no handler, user needs help
+        this._helpAndError();
+      }
+
+      outputHelpIfRequested(this, parsed.unknown);
+      this._checkForMissingMandatoryOptions();
+      if (parsed.unknown.length > 0) {
+        this.unknownOption(parsed.unknown[0]);
+      }
+
+      if (this._actionHandler) {
+        const args = this.args.slice();
+        this._args.forEach((arg, i) => {
+          if (arg.required && args[i] == null) {
+            this.missingArgument(arg.name);
+          } else if (arg.variadic) {
+            args[i] = args.splice(i);
+          }
+        });
+
+        this._actionHandler(args);
+        this.emit('command:' + this.name(), operands, unknown);
+      } else if (operands.length) {
+        if (this._findCommand('*')) {
+          this._dispatchSubcommand('*', operands, unknown);
+        } else if (this.listenerCount('command:*')) {
+          this.emit('command:*', operands, unknown);
+        } else if (this.commands.length) {
+          this.unknownCommand();
+        }
+      } else if (this.commands.length) {
+        // This command has subcommands and nothing hooked up at this level, so display help.
+        this._helpAndError();
+      } else {
+        // fall through for caller to handle after calling .parse()
+      }
+    }
+  };
+
+  /**
+   * Find matching command.
+   *
+   * @api private
+   */
+  _findCommand(name) {
+    if (!name) return undefined;
+    return this.commands.find(cmd => cmd._name === name || cmd._aliases.includes(name));
+  };
+
+  /**
+   * Return an option matching `arg` if any.
+   *
+   * @param {string} arg
+   * @return {Option}
+   * @api private
+   */
+
+  _findOption(arg) {
+    return this.options.find(option => option.is(arg));
+  };
+
+  /**
+   * Display an error message if a mandatory option does not have a value.
+   * Lazy calling after checking for help flags from leaf subcommand.
+   *
+   * @api private
+   */
+
+  _checkForMissingMandatoryOptions() {
+    // Walk up hierarchy so can call in subcommand after checking for displaying help.
+    for (let cmd = this; cmd; cmd = cmd.parent) {
+      cmd.options.forEach((anOption) => {
+        if (anOption.mandatory && (cmd._getOptionValue(anOption.attributeName()) === undefined)) {
+          cmd.missingMandatoryOptionValue(anOption);
+        }
+      });
+    }
+  };
+
+  /**
+   * Parse options from `argv` removing known options,
+   * and return argv split into operands and unknown arguments.
+   *
+   * Examples:
+   *
+   *    argv => operands, unknown
+   *    --known kkk op => [op], []
+   *    op --known kkk => [op], []
+   *    sub --unknown uuu op => [sub], [--unknown uuu op]
+   *    sub -- --unknown uuu op => [sub --unknown uuu op], []
+   *
+   * @param {String[]} argv
+   * @return {{operands: String[], unknown: String[]}}
+   * @api public
+   */
+
+  parseOptions(argv) {
+    const operands = []; // operands, not options or values
+    const unknown = []; // first unknown option and remaining unknown args
+    let dest = operands;
+    const args = argv.slice();
+
+    function maybeOption(arg) {
+      return arg.length > 1 && arg[0] === '-';
+    }
+
+    // parse options
+    let activeVariadicOption = null;
+    while (args.length) {
+      const arg = args.shift();
+
+      // literal
+      if (arg === '--') {
+        if (dest === unknown) dest.push(arg);
+        dest.push(...args);
+        break;
+      }
+
+      if (activeVariadicOption && !maybeOption(arg)) {
+        this.emit(`option:${activeVariadicOption.name()}`, arg);
+        continue;
+      }
+      activeVariadicOption = null;
+
+      if (maybeOption(arg)) {
+        const option = this._findOption(arg);
+        // recognised option, call listener to assign value with possible custom processing
+        if (option) {
+          if (option.required) {
+            const value = args.shift();
+            if (value === undefined) this.optionMissingArgument(option);
+            this.emit(`option:${option.name()}`, value);
+          } else if (option.optional) {
+            let value = null;
+            // historical behaviour is optional value is following arg unless an option
+            if (args.length > 0 && !maybeOption(args[0])) {
+              value = args.shift();
+            }
+            this.emit(`option:${option.name()}`, value);
+          } else { // boolean flag
+            this.emit(`option:${option.name()}`);
+          }
+          activeVariadicOption = option.variadic ? option : null;
+          continue;
+        }
+      }
+
+      // Look for combo options following single dash, eat first one if known.
+      if (arg.length > 2 && arg[0] === '-' && arg[1] !== '-') {
+        const option = this._findOption(`-${arg[1]}`);
+        if (option) {
+          if (option.required || (option.optional && this._combineFlagAndOptionalValue)) {
+            // option with value following in same argument
+            this.emit(`option:${option.name()}`, arg.slice(2));
+          } else {
+            // boolean option, emit and put back remainder of arg for further processing
+            this.emit(`option:${option.name()}`);
+            args.unshift(`-${arg.slice(2)}`);
+          }
+          continue;
+        }
+      }
+
+      // Look for known long flag with value, like --foo=bar
+      if (/^--[^=]+=/.test(arg)) {
+        const index = arg.indexOf('=');
+        const option = this._findOption(arg.slice(0, index));
+        if (option && (option.required || option.optional)) {
+          this.emit(`option:${option.name()}`, arg.slice(index + 1));
+          continue;
+        }
+      }
+
+      // looks like an option but unknown, unknowns from here
+      if (arg.length > 1 && arg[0] === '-') {
+        dest = unknown;
+      }
+
+      // add arg
+      dest.push(arg);
+    }
+
+    return { operands, unknown };
+  };
+
+  /**
+   * Return an object containing options as key-value pairs
+   *
+   * @return {Object}
+   * @api public
+   */
+  opts() {
+    if (this._storeOptionsAsProperties) {
+      // Preserve original behaviour so backwards compatible when still using properties
+      const result = {};
+      const len = this.options.length;
+
+      for (let i = 0; i < len; i++) {
+        const key = this.options[i].attributeName();
+        result[key] = key === this._versionOptionName ? this._version : this[key];
+      }
+      return result;
+    }
+
+    return this._optionValues;
+  };
+
+  /**
+   * Argument `name` is missing.
+   *
+   * @param {string} name
+   * @api private
+   */
+
+  missingArgument(name) {
+    const message = `error: missing required argument '${name}'`;
+    console.error(message);
+    this._exit(1, 'commander.missingArgument', message);
+  };
+
+  /**
+   * `Option` is missing an argument, but received `flag` or nothing.
+   *
+   * @param {Option} option
+   * @param {string} [flag]
+   * @api private
+   */
+
+  optionMissingArgument(option, flag) {
+    let message;
+    if (flag) {
+      message = `error: option '${option.flags}' argument missing, got '${flag}'`;
+    } else {
+      message = `error: option '${option.flags}' argument missing`;
+    }
+    console.error(message);
+    this._exit(1, 'commander.optionMissingArgument', message);
+  };
+
+  /**
+   * `Option` does not have a value, and is a mandatory option.
+   *
+   * @param {Option} option
+   * @api private
+   */
+
+  missingMandatoryOptionValue(option) {
+    const message = `error: required option '${option.flags}' not specified`;
+    console.error(message);
+    this._exit(1, 'commander.missingMandatoryOptionValue', message);
+  };
+
+  /**
+   * Unknown option `flag`.
+   *
+   * @param {string} flag
+   * @api private
+   */
+
+  unknownOption(flag) {
+    if (this._allowUnknownOption) return;
+    const message = `error: unknown option '${flag}'`;
+    console.error(message);
+    this._exit(1, 'commander.unknownOption', message);
+  };
+
+  /**
+   * Unknown command.
+   *
+   * @api private
+   */
+
+  unknownCommand() {
+    const partCommands = [this.name()];
+    for (let parentCmd = this.parent; parentCmd; parentCmd = parentCmd.parent) {
+      partCommands.unshift(parentCmd.name());
+    }
+    const fullCommand = partCommands.join(' ');
+    const message = `error: unknown command '${this.args[0]}'.` +
+      (this._hasHelpOption ? ` See '${fullCommand} ${this._helpLongFlag}'.` : '');
+    console.error(message);
+    this._exit(1, 'commander.unknownCommand', message);
+  };
+
+  /**
+   * Set the program version to `str`.
+   *
+   * This method auto-registers the "-V, --version" flag
+   * which will print the version number when passed.
+   *
+   * You can optionally supply the  flags and description to override the defaults.
+   *
+   * @param {string} str
+   * @param {string} [flags]
+   * @param {string} [description]
+   * @return {this | string} `this` command for chaining, or version string if no arguments
+   * @api public
+   */
+
+  version(str, flags, description) {
+    if (str === undefined) return this._version;
+    this._version = str;
+    flags = flags || '-V, --version';
+    description = description || 'output the version number';
+    const versionOption = new Option(flags, description);
+    this._versionOptionName = versionOption.attributeName();
+    this.options.push(versionOption);
+    this.on('option:' + versionOption.name(), () => {
+      process.stdout.write(str + '\n');
+      this._exit(0, 'commander.version', str);
+    });
+    return this;
+  };
+
+  /**
+   * Set the description to `str`.
+   *
+   * @param {string} str
+   * @param {Object} [argsDescription]
+   * @return {string|Command}
+   * @api public
+   */
+
+  description(str, argsDescription) {
+    if (str === undefined && argsDescription === undefined) return this._description;
+    this._description = str;
+    this._argsDescription = argsDescription;
+    return this;
+  };
+
+  /**
+   * Set an alias for the command.
+   *
+   * You may call more than once to add multiple aliases. Only the first alias is shown in the auto-generated help.
+   *
+   * @param {string} [alias]
+   * @return {string|Command}
+   * @api public
+   */
+
+  alias(alias) {
+    if (alias === undefined) return this._aliases[0]; // just return first, for backwards compatibility
+
+    let command = this;
+    if (this.commands.length !== 0 && this.commands[this.commands.length - 1]._executableHandler) {
+      // assume adding alias for last added executable subcommand, rather than this
+      command = this.commands[this.commands.length - 1];
+    }
+
+    if (alias === command._name) throw new Error('Command alias can\'t be the same as its name');
+
+    command._aliases.push(alias);
+    return this;
+  };
+
+  /**
+   * Set aliases for the command.
+   *
+   * Only the first alias is shown in the auto-generated help.
+   *
+   * @param {string[]} [aliases]
+   * @return {string[]|Command}
+   * @api public
+   */
+
+  aliases(aliases) {
+    // Getter for the array of aliases is the main reason for having aliases() in addition to alias().
+    if (aliases === undefined) return this._aliases;
+
+    aliases.forEach((alias) => this.alias(alias));
+    return this;
+  };
+
+  /**
+   * Set / get the command usage `str`.
+   *
+   * @param {string} [str]
+   * @return {String|Command}
+   * @api public
+   */
+
+  usage(str) {
+    if (str === undefined) {
+      if (this._usage) return this._usage;
+
+      const args = this._args.map((arg) => {
+        return humanReadableArgName(arg);
+      });
+      return [].concat(
+        (this.options.length || this._hasHelpOption ? '[options]' : []),
+        (this.commands.length ? '[command]' : []),
+        (this._args.length ? args : [])
+      ).join(' ');
+    }
+
+    this._usage = str;
+    return this;
+  };
+
+  /**
+   * Get or set the name of the command
+   *
+   * @param {string} [str]
+   * @return {String|Command}
+   * @api public
+   */
+
+  name(str) {
+    if (str === undefined) return this._name;
+    this._name = str;
+    return this;
+  };
+
+  /**
+   * Return prepared commands.
+   *
+   * @return {Array}
+   * @api private
+   */
+
+  prepareCommands() {
+    const commandDetails = this.commands.filter((cmd) => {
+      return !cmd._hidden;
+    }).map((cmd) => {
+      const args = cmd._args.map((arg) => {
+        return humanReadableArgName(arg);
+      }).join(' ');
+
+      return [
+        cmd._name +
+          (cmd._aliases[0] ? '|' + cmd._aliases[0] : '') +
+          (cmd.options.length ? ' [options]' : '') +
+          (args ? ' ' + args : ''),
+        cmd._description
+      ];
+    });
+
+    if (this._lazyHasImplicitHelpCommand()) {
+      commandDetails.push([this._helpCommandnameAndArgs, this._helpCommandDescription]);
+    }
+    return commandDetails;
+  };
+
+  /**
+   * Return the largest command length.
+   *
+   * @return {number}
+   * @api private
+   */
+
+  largestCommandLength() {
+    const commands = this.prepareCommands();
+    return commands.reduce((max, command) => {
+      return Math.max(max, command[0].length);
+    }, 0);
+  };
+
+  /**
+   * Return the largest option length.
+   *
+   * @return {number}
+   * @api private
+   */
+
+  largestOptionLength() {
+    const options = [].slice.call(this.options);
+    options.push({
+      flags: this._helpFlags
+    });
+
+    return options.reduce((max, option) => {
+      return Math.max(max, option.flags.length);
+    }, 0);
+  };
+
+  /**
+   * Return the largest arg length.
+   *
+   * @return {number}
+   * @api private
+   */
+
+  largestArgLength() {
+    return this._args.reduce((max, arg) => {
+      return Math.max(max, arg.name.length);
+    }, 0);
+  };
+
+  /**
+   * Return the pad width.
+   *
+   * @return {number}
+   * @api private
+   */
+
+  padWidth() {
+    let width = this.largestOptionLength();
+    if (this._argsDescription && this._args.length) {
+      if (this.largestArgLength() > width) {
+        width = this.largestArgLength();
+      }
+    }
+
+    if (this.commands && this.commands.length) {
+      if (this.largestCommandLength() > width) {
+        width = this.largestCommandLength();
+      }
+    }
+
+    return width;
+  };
+
+  /**
+   * Return help for options.
+   *
+   * @return {string}
+   * @api private
+   */
+
+  optionHelp() {
+    const width = this.padWidth();
+    const columns = process.stdout.columns || 80;
+    const descriptionWidth = columns - width - 4;
+    function padOptionDetails(flags, description) {
+      return pad(flags, width) + '  ' + optionalWrap(description, descriptionWidth, width + 2);
+    };
+
+    // Explicit options (including version)
+    const help = this.options.map((option) => {
+      const fullDesc = option.description +
+        ((!option.negate && option.defaultValue !== undefined) ? ' (default: ' + JSON.stringify(option.defaultValue) + ')' : '');
+      return padOptionDetails(option.flags, fullDesc);
+    });
+
+    // Implicit help
+    const showShortHelpFlag = this._hasHelpOption && this._helpShortFlag && !this._findOption(this._helpShortFlag);
+    const showLongHelpFlag = this._hasHelpOption && !this._findOption(this._helpLongFlag);
+    if (showShortHelpFlag || showLongHelpFlag) {
+      let helpFlags = this._helpFlags;
+      if (!showShortHelpFlag) {
+        helpFlags = this._helpLongFlag;
+      } else if (!showLongHelpFlag) {
+        helpFlags = this._helpShortFlag;
+      }
+      help.push(padOptionDetails(helpFlags, this._helpDescription));
+    }
+
+    return help.join('\n');
+  };
+
+  /**
+   * Return command help documentation.
+   *
+   * @return {string}
+   * @api private
+   */
+
+  commandHelp() {
+    if (!this.commands.length && !this._lazyHasImplicitHelpCommand()) return '';
+
+    const commands = this.prepareCommands();
+    const width = this.padWidth();
+
+    const columns = process.stdout.columns || 80;
+    const descriptionWidth = columns - width - 4;
+
+    return [
+      'Commands:',
+      commands.map((cmd) => {
+        const desc = cmd[1] ? '  ' + cmd[1] : '';
+        return (desc ? pad(cmd[0], width) : cmd[0]) + optionalWrap(desc, descriptionWidth, width + 2);
+      }).join('\n').replace(/^/gm, '  '),
+      ''
+    ].join('\n');
+  };
+
+  /**
+   * Return program help documentation.
+   *
+   * @return {string}
+   * @api public
+   */
+
+  helpInformation() {
+    let desc = [];
+    if (this._description) {
+      desc = [
+        this._description,
+        ''
+      ];
+
+      const argsDescription = this._argsDescription;
+      if (argsDescription && this._args.length) {
+        const width = this.padWidth();
+        const columns = process.stdout.columns || 80;
+        const descriptionWidth = columns - width - 5;
+        desc.push('Arguments:');
+        this._args.forEach((arg) => {
+          desc.push('  ' + pad(arg.name, width) + '  ' + wrap(argsDescription[arg.name] || '', descriptionWidth, width + 4));
+        });
+        desc.push('');
+      }
+    }
+
+    let cmdName = this._name;
+    if (this._aliases[0]) {
+      cmdName = cmdName + '|' + this._aliases[0];
+    }
+    let parentCmdNames = '';
+    for (let parentCmd = this.parent; parentCmd; parentCmd = parentCmd.parent) {
+      parentCmdNames = parentCmd.name() + ' ' + parentCmdNames;
+    }
+    const usage = [
+      'Usage: ' + parentCmdNames + cmdName + ' ' + this.usage(),
+      ''
+    ];
+
+    let cmds = [];
+    const commandHelp = this.commandHelp();
+    if (commandHelp) cmds = [commandHelp];
+
+    let options = [];
+    if (this._hasHelpOption || this.options.length > 0) {
+      options = [
+        'Options:',
+        '' + this.optionHelp().replace(/^/gm, '  '),
+        ''
+      ];
+    }
+
+    return usage
+      .concat(desc)
+      .concat(options)
+      .concat(cmds)
+      .join('\n');
+  };
+
+  /**
+   * Output help information for this command.
+   *
+   * When listener(s) are available for the helpLongFlag
+   * those callbacks are invoked.
+   *
+   * @api public
+   */
+
+  outputHelp(cb) {
+    if (!cb) {
+      cb = (passthru) => {
+        return passthru;
+      };
+    }
+    const cbOutput = cb(this.helpInformation());
+    if (typeof cbOutput !== 'string' && !Buffer.isBuffer(cbOutput)) {
+      throw new Error('outputHelp callback must return a string or a Buffer');
+    }
+    process.stdout.write(cbOutput);
+    this.emit(this._helpLongFlag);
+  };
+
+  /**
+   * You can pass in flags and a description to override the help
+   * flags and help description for your command. Pass in false to
+   * disable the built-in help option.
+   *
+   * @param {string | boolean} [flags]
+   * @param {string} [description]
+   * @return {Command} `this` command for chaining
+   * @api public
+   */
+
+  helpOption(flags, description) {
+    if (typeof flags === 'boolean') {
+      this._hasHelpOption = flags;
+      return this;
+    }
+    this._helpFlags = flags || this._helpFlags;
+    this._helpDescription = description || this._helpDescription;
+
+    const helpFlags = _parseOptionFlags(this._helpFlags);
+    this._helpShortFlag = helpFlags.shortFlag;
+    this._helpLongFlag = helpFlags.longFlag;
+
+    return this;
+  };
+
+  /**
+   * Output help information and exit.
+   *
+   * @param {Function} [cb]
+   * @api public
+   */
+
+  help(cb) {
+    this.outputHelp(cb);
+    // exitCode: preserving original behaviour which was calling process.exit()
+    // message: do not have all displayed text available so only passing placeholder.
+    this._exit(process.exitCode || 0, 'commander.help', '(outputHelp)');
+  };
+
+  /**
+   * Output help information and exit. Display for error situations.
+   *
+   * @api private
+   */
+
+  _helpAndError() {
+    this.outputHelp();
+    // message: do not have all displayed text available so only passing placeholder.
+    this._exit(1, 'commander.help', '(outputHelp)');
+  };
+};
+
+/**
+ * Expose the root command.
+ */
+
+exports = module.exports = new Command();
+exports.program = exports; // More explicit access to global command.
+
+/**
+ * Expose classes
+ */
+
+exports.Command = Command;
+exports.Option = Option;
+exports.CommanderError = CommanderError;
+
+/**
+ * Camel-case the given `flag`
+ *
+ * @param {string} flag
+ * @return {string}
+ * @api private
+ */
+
+function camelcase(flag) {
+  return flag.split('-').reduce((str, word) => {
+    return str + word[0].toUpperCase() + word.slice(1);
+  });
+}
+
+/**
+ * Pad `str` to `width`.
+ *
+ * @param {string} str
+ * @param {number} width
+ * @return {string}
+ * @api private
+ */
+
+function pad(str, width) {
+  const len = Math.max(0, width - str.length);
+  return str + Array(len + 1).join(' ');
+}
+
+/**
+ * Wraps the given string with line breaks at the specified width while breaking
+ * words and indenting every but the first line on the left.
+ *
+ * @param {string} str
+ * @param {number} width
+ * @param {number} indent
+ * @return {string}
+ * @api private
+ */
+function wrap(str, width, indent) {
+  const regex = new RegExp('.{1,' + (width - 1) + '}([\\s\u200B]|$)|[^\\s\u200B]+?([\\s\u200B]|$)', 'g');
+  const lines = str.match(regex) || [];
+  return lines.map((line, i) => {
+    if (line.slice(-1) === '\n') {
+      line = line.slice(0, line.length - 1);
+    }
+    return ((i > 0 && indent) ? Array(indent + 1).join(' ') : '') + line.trimRight();
+  }).join('\n');
+}
+
+/**
+ * Optionally wrap the given str to a max width of width characters per line
+ * while indenting with indent spaces. Do not wrap if insufficient width or
+ * string is manually formatted.
+ *
+ * @param {string} str
+ * @param {number} width
+ * @param {number} indent
+ * @return {string}
+ * @api private
+ */
+function optionalWrap(str, width, indent) {
+  // Detect manually wrapped and indented strings by searching for line breaks
+  // followed by multiple spaces/tabs.
+  if (str.match(/[\n]\s+/)) return str;
+  // Do not wrap to narrow columns (or can end up with a word per line).
+  const minWidth = 40;
+  if (width < minWidth) return str;
+
+  return wrap(str, width, indent);
+}
+
+/**
+ * Output help information if help flags specified
+ *
+ * @param {Command} cmd - command to output help for
+ * @param {Array} args - array of options to search for help flags
+ * @api private
+ */
+
+function outputHelpIfRequested(cmd, args) {
+  const helpOption = cmd._hasHelpOption && args.find(arg => arg === cmd._helpLongFlag || arg === cmd._helpShortFlag);
+  if (helpOption) {
+    cmd.outputHelp();
+    // (Do not have all displayed text available so only passing placeholder.)
+    cmd._exit(0, 'commander.helpDisplayed', '(outputHelp)');
+  }
+}
+
+/**
+ * Takes an argument and returns its human readable equivalent for help usage.
+ *
+ * @param {Object} arg
+ * @return {string}
+ * @api private
+ */
+
+function humanReadableArgName(arg) {
+  const nameOutput = arg.name + (arg.variadic === true ? '...' : '');
+
+  return arg.required
+    ? '<' + nameOutput + '>'
+    : '[' + nameOutput + ']';
+}
+
+/**
+ * Parse the short and long flag out of something like '-m,--mixed <value>'
+ *
+ * @api private
+ */
+
+function _parseOptionFlags(flags) {
+  let shortFlag;
+  let longFlag;
+  // Use original very loose parsing to maintain backwards compatibility for now,
+  // which allowed for example unintended `-sw, --short-word` [sic].
+  const flagParts = flags.split(/[ |,]+/);
+  if (flagParts.length > 1 && !/^[[<]/.test(flagParts[1])) shortFlag = flagParts.shift();
+  longFlag = flagParts.shift();
+  // Add support for lone short flag without significantly changing parsing!
+  if (!shortFlag && /^-[^-]$/.test(longFlag)) {
+    shortFlag = longFlag;
+    longFlag = undefined;
+  }
+  return { shortFlag, longFlag };
+}
+
+/**
+ * Scan arguments and increment port number for inspect calls (to avoid conflicts when spawning new command).
+ *
+ * @param {string[]} args - array of arguments from node.execArgv
+ * @returns {string[]}
+ * @api private
+ */
+
+function incrementNodeInspectorPort(args) {
+  // Testing for these options:
+  //  --inspect[=[host:]port]
+  //  --inspect-brk[=[host:]port]
+  //  --inspect-port=[host:]port
+  return args.map((arg) => {
+    if (!arg.startsWith('--inspect')) {
+      return arg;
+    }
+    let debugOption;
+    let debugHost = '127.0.0.1';
+    let debugPort = '9229';
+    let match;
+    if ((match = arg.match(/^(--inspect(-brk)?)$/)) !== null) {
+      // e.g. --inspect
+      debugOption = match[1];
+    } else if ((match = arg.match(/^(--inspect(-brk|-port)?)=([^:]+)$/)) !== null) {
+      debugOption = match[1];
+      if (/^\d+$/.test(match[3])) {
+        // e.g. --inspect=1234
+        debugPort = match[3];
+      } else {
+        // e.g. --inspect=localhost
+        debugHost = match[3];
+      }
+    } else if ((match = arg.match(/^(--inspect(-brk|-port)?)=([^:]+):(\d+)$/)) !== null) {
+      // e.g. --inspect=localhost:1234
+      debugOption = match[1];
+      debugHost = match[3];
+      debugPort = match[4];
+    }
+
+    if (debugOption && debugPort !== '0') {
+      return `${debugOption}=${debugHost}:${parseInt(debugPort) + 1}`;
+    }
+    return arg;
+  });
+}
 
 
 /***/ }),
 /* 5 */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+
+if (true) {
+  module.exports = __webpack_require__(34);
+} else {}
+
+
+/***/ }),
+/* 6 */
 /***/ (function(module, exports, __webpack_require__) {
 
 module.exports = minimatch
@@ -369,7 +2256,7 @@ try {
 } catch (er) {}
 
 var GLOBSTAR = minimatch.GLOBSTAR = Minimatch.GLOBSTAR = {}
-var expand = __webpack_require__(35)
+var expand = __webpack_require__(38)
 
 var plTypes = {
   '!': { open: '(?:(?!(?:', close: '))[^/]*?)'},
@@ -1286,13 +3173,13 @@ function regExpEscape (s) {
 
 
 /***/ }),
-/* 6 */
+/* 7 */
 /***/ (function(module, exports) {
 
 module.exports = require("util");
 
 /***/ }),
-/* 7 */
+/* 8 */
 /***/ (function(module, exports, __webpack_require__) {
 
 "use strict";
@@ -1319,7 +3206,7 @@ module.exports.win32 = win32;
 
 
 /***/ }),
-/* 8 */
+/* 9 */
 /***/ (function(module, exports, __webpack_require__) {
 
 // Approach:
@@ -1365,26 +3252,26 @@ module.exports.win32 = win32;
 module.exports = glob
 
 var fs = __webpack_require__(2)
-var rp = __webpack_require__(13)
-var minimatch = __webpack_require__(5)
+var rp = __webpack_require__(15)
+var minimatch = __webpack_require__(6)
 var Minimatch = minimatch.Minimatch
-var inherits = __webpack_require__(38)
-var EE = __webpack_require__(40).EventEmitter
+var inherits = __webpack_require__(41)
+var EE = __webpack_require__(12).EventEmitter
 var path = __webpack_require__(1)
-var assert = __webpack_require__(14)
-var isAbsolute = __webpack_require__(7)
-var globSync = __webpack_require__(41)
-var common = __webpack_require__(15)
+var assert = __webpack_require__(16)
+var isAbsolute = __webpack_require__(8)
+var globSync = __webpack_require__(43)
+var common = __webpack_require__(17)
 var alphasort = common.alphasort
 var alphasorti = common.alphasorti
 var setopts = common.setopts
 var ownProp = common.ownProp
-var inflight = __webpack_require__(42)
-var util = __webpack_require__(6)
+var inflight = __webpack_require__(44)
+var util = __webpack_require__(7)
 var childrenIgnored = common.childrenIgnored
 var isIgnored = common.isIgnored
 
-var once = __webpack_require__(17)
+var once = __webpack_require__(19)
 
 function glob (pattern, options, cb) {
   if (typeof options === 'function') cb = options, options = {}
@@ -2115,13 +4002,13 @@ Glob.prototype._stat2 = function (f, abs, er, stat, cb) {
 
 
 /***/ }),
-/* 9 */
+/* 10 */
 /***/ (function(module, exports, __webpack_require__) {
 
 "use strict";
 
 
-var reactIs = __webpack_require__(4);
+var reactIs = __webpack_require__(5);
 
 /**
  * Copyright 2015, Yahoo! Inc.
@@ -2225,11 +4112,11 @@ module.exports = hoistNonReactStatics;
 
 
 /***/ }),
-/* 10 */
+/* 11 */
 /***/ (function(module, exports, __webpack_require__) {
 
 /* MIT license */
-var cssKeywords = __webpack_require__(23);
+var cssKeywords = __webpack_require__(25);
 
 // NOTE: conversions should only return primitive values (i.e. arrays, or
 //       values that give correct `typeof` results).
@@ -3099,7 +4986,13 @@ convert.rgb.gray = function (rgb) {
 
 
 /***/ }),
-/* 11 */
+/* 12 */
+/***/ (function(module, exports) {
+
+module.exports = require("events");
+
+/***/ }),
+/* 13 */
 /***/ (function(module, exports, __webpack_require__) {
 
 "use strict";
@@ -3196,13 +5089,13 @@ module.exports = shouldUseNative() ? Object.assign : function (target, source) {
 
 
 /***/ }),
-/* 12 */
+/* 14 */
 /***/ (function(module, exports) {
 
 module.exports = require("stream");
 
 /***/ }),
-/* 13 */
+/* 15 */
 /***/ (function(module, exports, __webpack_require__) {
 
 module.exports = realpath
@@ -3218,7 +5111,7 @@ var origRealpathSync = fs.realpathSync
 
 var version = process.version
 var ok = /^v[0-5]\./.test(version)
-var old = __webpack_require__(34)
+var old = __webpack_require__(37)
 
 function newError (er) {
   return er && er.syscall === 'realpath' && (
@@ -3274,13 +5167,13 @@ function unmonkeypatch () {
 
 
 /***/ }),
-/* 14 */
+/* 16 */
 /***/ (function(module, exports) {
 
 module.exports = require("assert");
 
 /***/ }),
-/* 15 */
+/* 17 */
 /***/ (function(module, exports, __webpack_require__) {
 
 exports.alphasort = alphasort
@@ -3298,8 +5191,8 @@ function ownProp (obj, field) {
 }
 
 var path = __webpack_require__(1)
-var minimatch = __webpack_require__(5)
-var isAbsolute = __webpack_require__(7)
+var minimatch = __webpack_require__(6)
+var isAbsolute = __webpack_require__(8)
 var Minimatch = minimatch.Minimatch
 
 function alphasorti (a, b) {
@@ -3526,7 +5419,7 @@ function childrenIgnored (self, path) {
 
 
 /***/ }),
-/* 16 */
+/* 18 */
 /***/ (function(module, exports) {
 
 // Returns a wrapper function that returns a wrapped callback
@@ -3565,10 +5458,10 @@ function wrappy (fn, cb) {
 
 
 /***/ }),
-/* 17 */
+/* 19 */
 /***/ (function(module, exports, __webpack_require__) {
 
-var wrappy = __webpack_require__(16)
+var wrappy = __webpack_require__(18)
 module.exports = wrappy(once)
 module.exports.strict = wrappy(onceStrict)
 
@@ -3613,7 +5506,7 @@ function onceStrict (fn) {
 
 
 /***/ }),
-/* 18 */
+/* 20 */
 /***/ (function(module, exports) {
 
 //
@@ -3665,22 +5558,22 @@ module.exports = function shallowEqual(objA, objB, compare, compareContext) {
 
 
 /***/ }),
-/* 19 */
+/* 21 */
 /***/ (function(module, exports, __webpack_require__) {
 
 "use strict";
 
 
-module.exports = __webpack_require__(32);
+module.exports = __webpack_require__(35);
 
 
 /***/ }),
-/* 20 */
+/* 22 */
 /***/ (function(module, exports, __webpack_require__) {
 
 "use strict";
 /* WEBPACK VAR INJECTION */(function(module) {
-const colorConvert = __webpack_require__(22);
+const colorConvert = __webpack_require__(24);
 
 const wrapAnsi16 = (fn, offset) => function () {
 	const code = fn.apply(colorConvert, arguments);
@@ -3845,10 +5738,10 @@ Object.defineProperty(module, 'exports', {
 	get: assembleStyles
 });
 
-/* WEBPACK VAR INJECTION */}.call(this, __webpack_require__(21)(module)))
+/* WEBPACK VAR INJECTION */}.call(this, __webpack_require__(23)(module)))
 
 /***/ }),
-/* 21 */
+/* 23 */
 /***/ (function(module, exports) {
 
 module.exports = function(module) {
@@ -3876,11 +5769,11 @@ module.exports = function(module) {
 
 
 /***/ }),
-/* 22 */
+/* 24 */
 /***/ (function(module, exports, __webpack_require__) {
 
-var conversions = __webpack_require__(10);
-var route = __webpack_require__(24);
+var conversions = __webpack_require__(11);
+var route = __webpack_require__(26);
 
 var convert = {};
 
@@ -3960,7 +5853,7 @@ module.exports = convert;
 
 
 /***/ }),
-/* 23 */
+/* 25 */
 /***/ (function(module, exports, __webpack_require__) {
 
 "use strict";
@@ -4119,10 +6012,10 @@ module.exports = {
 
 
 /***/ }),
-/* 24 */
+/* 26 */
 /***/ (function(module, exports, __webpack_require__) {
 
-var conversions = __webpack_require__(10);
+var conversions = __webpack_require__(11);
 
 /*
 	this function routes a model to all other models.
@@ -4222,13 +6115,13 @@ module.exports = function (fromModel) {
 
 
 /***/ }),
-/* 25 */
+/* 27 */
 /***/ (function(module, exports, __webpack_require__) {
 
 "use strict";
 
-const os = __webpack_require__(26);
-const hasFlag = __webpack_require__(27);
+const os = __webpack_require__(28);
+const hasFlag = __webpack_require__(29);
 
 const env = process.env;
 
@@ -4360,13 +6253,13 @@ module.exports = {
 
 
 /***/ }),
-/* 26 */
+/* 28 */
 /***/ (function(module, exports) {
 
 module.exports = require("os");
 
 /***/ }),
-/* 27 */
+/* 29 */
 /***/ (function(module, exports, __webpack_require__) {
 
 "use strict";
@@ -4381,7 +6274,7 @@ module.exports = (flag, argv) => {
 
 
 /***/ }),
-/* 28 */
+/* 30 */
 /***/ (function(module, exports, __webpack_require__) {
 
 "use strict";
@@ -4427,7 +6320,7 @@ module.exports = {
 
 
 /***/ }),
-/* 29 */
+/* 31 */
 /***/ (function(module, exports, __webpack_require__) {
 
 "use strict";
@@ -4568,7 +6461,13 @@ module.exports = (chalk, temporary) => {
 
 
 /***/ }),
-/* 30 */
+/* 32 */
+/***/ (function(module, exports) {
+
+module.exports = require("child_process");
+
+/***/ }),
+/* 33 */
 /***/ (function(module, exports, __webpack_require__) {
 
 "use strict";
@@ -4580,7 +6479,7 @@ module.exports = (chalk, temporary) => {
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
  */
-var l=__webpack_require__(11),n=60103,p=60106;exports.Fragment=60107;exports.StrictMode=60108;exports.Profiler=60114;var q=60109,r=60110,t=60112;exports.Suspense=60113;var u=60115,v=60116;
+var l=__webpack_require__(13),n=60103,p=60106;exports.Fragment=60107;exports.StrictMode=60108;exports.Profiler=60114;var q=60109,r=60110,t=60112;exports.Suspense=60113;var u=60115,v=60116;
 if("function"===typeof Symbol&&Symbol.for){var w=Symbol.for;n=w("react.element");p=w("react.portal");exports.Fragment=w("react.fragment");exports.StrictMode=w("react.strict_mode");exports.Profiler=w("react.profiler");q=w("react.provider");r=w("react.context");t=w("react.forward_ref");exports.Suspense=w("react.suspense");u=w("react.memo");v=w("react.lazy")}var x="function"===typeof Symbol&&Symbol.iterator;
 function y(a){if(null===a||"object"!==typeof a)return null;a=x&&a[x]||a["@@iterator"];return"function"===typeof a?a:null}function z(a){for(var b="https://reactjs.org/docs/error-decoder.html?invariant="+a,c=1;c<arguments.length;c++)b+="&args[]="+encodeURIComponent(arguments[c]);return"Minified React error #"+a+"; visit "+b+" for the full message or use the non-minified dev environment for full errors and additional helpful warnings."}
 var A={isMounted:function(){return!1},enqueueForceUpdate:function(){},enqueueReplaceState:function(){},enqueueSetState:function(){}},B={};function C(a,b,c){this.props=a;this.context=b;this.refs=B;this.updater=c||A}C.prototype.isReactComponent={};C.prototype.setState=function(a,b){if("object"!==typeof a&&"function"!==typeof a&&null!=a)throw Error(z(85));this.updater.enqueueSetState(this,a,b,"setState")};C.prototype.forceUpdate=function(a){this.updater.enqueueForceUpdate(this,a,"forceUpdate")};
@@ -4598,7 +6497,7 @@ exports.useLayoutEffect=function(a,b){return S().useLayoutEffect(a,b)};exports.u
 
 
 /***/ }),
-/* 31 */
+/* 34 */
 /***/ (function(module, exports, __webpack_require__) {
 
 "use strict";
@@ -4620,19 +6519,19 @@ exports.isValidElementType=function(a){return"string"===typeof a||"function"===t
 
 
 /***/ }),
-/* 32 */
+/* 35 */
 /***/ (function(module, exports, __webpack_require__) {
 
 "use strict";
 
 
 if (true) {
-  module.exports = __webpack_require__(33);
+  module.exports = __webpack_require__(36);
 } else {}
 
 
 /***/ }),
-/* 33 */
+/* 36 */
 /***/ (function(module, exports, __webpack_require__) {
 
 "use strict";
@@ -4644,7 +6543,7 @@ if (true) {
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
  */
-var l=__webpack_require__(11),n=__webpack_require__(0),aa=__webpack_require__(12);function p(a){for(var b="https://reactjs.org/docs/error-decoder.html?invariant="+a,c=1;c<arguments.length;c++)b+="&args[]="+encodeURIComponent(arguments[c]);return"Minified React error #"+a+"; visit "+b+" for the full message or use the non-minified dev environment for full errors and additional helpful warnings."}
+var l=__webpack_require__(13),n=__webpack_require__(0),aa=__webpack_require__(14);function p(a){for(var b="https://reactjs.org/docs/error-decoder.html?invariant="+a,c=1;c<arguments.length;c++)b+="&args[]="+encodeURIComponent(arguments[c]);return"Minified React error #"+a+"; visit "+b+" for the full message or use the non-minified dev environment for full errors and additional helpful warnings."}
 var q=60106,r=60107,u=60108,z=60114,B=60109,ba=60110,ca=60112,D=60113,da=60120,ea=60115,fa=60116,ha=60121,ia=60117,ja=60119,ka=60129,la=60131;
 if("function"===typeof Symbol&&Symbol.for){var E=Symbol.for;q=E("react.portal");r=E("react.fragment");u=E("react.strict_mode");z=E("react.profiler");B=E("react.provider");ba=E("react.context");ca=E("react.forward_ref");D=E("react.suspense");da=E("react.suspense_list");ea=E("react.memo");fa=E("react.lazy");ha=E("react.block");ia=E("react.fundamental");ja=E("react.scope");ka=E("react.debug_trace_mode");la=E("react.legacy_hidden")}
 function F(a){if(null==a)return null;if("function"===typeof a)return a.displayName||a.name||null;if("string"===typeof a)return a;switch(a){case r:return"Fragment";case q:return"Portal";case z:return"Profiler";case u:return"StrictMode";case D:return"Suspense";case da:return"SuspenseList"}if("object"===typeof a)switch(a.$$typeof){case ba:return(a.displayName||"Context")+".Consumer";case B:return(a._context.displayName||"Context")+".Provider";case ca:var b=a.render;b=b.displayName||b.name||"";return a.displayName||
@@ -4691,7 +6590,7 @@ exports.renderToStaticNodeStream=function(a,b){return new fb(a,!0,b)};exports.re
 
 
 /***/ }),
-/* 34 */
+/* 37 */
 /***/ (function(module, exports, __webpack_require__) {
 
 // Copyright Joyent, Inc. and other Node contributors.
@@ -5000,11 +6899,11 @@ exports.realpath = function realpath(p, cache, cb) {
 
 
 /***/ }),
-/* 35 */
+/* 38 */
 /***/ (function(module, exports, __webpack_require__) {
 
-var concatMap = __webpack_require__(36);
-var balanced = __webpack_require__(37);
+var concatMap = __webpack_require__(39);
+var balanced = __webpack_require__(40);
 
 module.exports = expandTop;
 
@@ -5207,7 +7106,7 @@ function expand(str, isTop) {
 
 
 /***/ }),
-/* 36 */
+/* 39 */
 /***/ (function(module, exports) {
 
 module.exports = function (xs, fn) {
@@ -5226,7 +7125,7 @@ var isArray = Array.isArray || function (xs) {
 
 
 /***/ }),
-/* 37 */
+/* 40 */
 /***/ (function(module, exports, __webpack_require__) {
 
 "use strict";
@@ -5292,22 +7191,22 @@ function range(a, b, str) {
 
 
 /***/ }),
-/* 38 */
+/* 41 */
 /***/ (function(module, exports, __webpack_require__) {
 
 try {
-  var util = __webpack_require__(6);
+  var util = __webpack_require__(7);
   /* istanbul ignore next */
   if (typeof util.inherits !== 'function') throw '';
   module.exports = util.inherits;
 } catch (e) {
   /* istanbul ignore next */
-  module.exports = __webpack_require__(39);
+  module.exports = __webpack_require__(42);
 }
 
 
 /***/ }),
-/* 39 */
+/* 42 */
 /***/ (function(module, exports) {
 
 if (typeof Object.create === 'function') {
@@ -5340,28 +7239,22 @@ if (typeof Object.create === 'function') {
 
 
 /***/ }),
-/* 40 */
-/***/ (function(module, exports) {
-
-module.exports = require("events");
-
-/***/ }),
-/* 41 */
+/* 43 */
 /***/ (function(module, exports, __webpack_require__) {
 
 module.exports = globSync
 globSync.GlobSync = GlobSync
 
 var fs = __webpack_require__(2)
-var rp = __webpack_require__(13)
-var minimatch = __webpack_require__(5)
+var rp = __webpack_require__(15)
+var minimatch = __webpack_require__(6)
 var Minimatch = minimatch.Minimatch
-var Glob = __webpack_require__(8).Glob
-var util = __webpack_require__(6)
+var Glob = __webpack_require__(9).Glob
+var util = __webpack_require__(7)
 var path = __webpack_require__(1)
-var assert = __webpack_require__(14)
-var isAbsolute = __webpack_require__(7)
-var common = __webpack_require__(15)
+var assert = __webpack_require__(16)
+var isAbsolute = __webpack_require__(8)
+var common = __webpack_require__(17)
 var alphasort = common.alphasort
 var alphasorti = common.alphasorti
 var setopts = common.setopts
@@ -5838,12 +7731,12 @@ GlobSync.prototype._makeAbs = function (f) {
 
 
 /***/ }),
-/* 42 */
+/* 44 */
 /***/ (function(module, exports, __webpack_require__) {
 
-var wrappy = __webpack_require__(16)
+var wrappy = __webpack_require__(18)
 var reqs = Object.create(null)
-var once = __webpack_require__(17)
+var once = __webpack_require__(19)
 
 module.exports = wrappy(inflight)
 
@@ -5898,7 +7791,13 @@ function slice (args) {
 
 
 /***/ }),
-/* 43 */
+/* 45 */
+/***/ (function(module) {
+
+module.exports = JSON.parse("{\"name\":\"artikel\",\"version\":\"0.0.3\",\"description\":\"\",\"main\":\"index.js\",\"bin\":{\"artikel\":\"index.js\"},\"scripts\":{\"build\":\"webpack -p\",\"html\":\"node ./dist/render.js\",\"clean\":\"rm -rf ./dist/\",\"render\":\"npm run build && npm run html && npm run clean\"},\"repository\":{\"type\":\"git\",\"url\":\"git+https://github.com/ElectricCookie/artikel.git\"},\"author\":\"\",\"license\":\"ISC\",\"bugs\":{\"url\":\"https://github.com/ElectricCookie/artikel/issues\"},\"homepage\":\"https://github.com/ElectricCookie/artikel#readme\",\"devDependencies\":{\"@babel/cli\":\"^7.12.10\",\"@babel/core\":\"^7.12.10\",\"@babel/preset-env\":\"^7.12.11\",\"@babel/preset-react\":\"^7.12.10\",\"webpack\":\"^4.44.2\",\"webpack-cli\":\"^3.3.12\"},\"dependencies\":{\"babel-loader\":\"^8.2.2\",\"chalk\":\"^4.1.0\",\"clipboardy\":\"^2.3.0\",\"commander\":\"^6.2.1\",\"express\":\"^4.17.1\",\"file-loader\":\"^6.2.0\",\"glob\":\"^7.1.6\",\"react\":\"^17.0.1\",\"react-dom\":\"^17.0.1\",\"styled-components\":\"^5.2.1\"}}");
+
+/***/ }),
+/* 46 */
 /***/ (function(module, __webpack_exports__, __webpack_require__) {
 
 "use strict";
@@ -5912,6 +7811,9 @@ var source_default = /*#__PURE__*/__webpack_require__.n(source);
 // EXTERNAL MODULE: external "path"
 var external_path_ = __webpack_require__(1);
 var external_path_default = /*#__PURE__*/__webpack_require__.n(external_path_);
+
+// EXTERNAL MODULE: ./node_modules/commander/index.js
+var commander = __webpack_require__(4);
 
 // EXTERNAL MODULE: external "fs"
 var external_fs_ = __webpack_require__(2);
@@ -6485,10 +8387,10 @@ var dd_Dd = function Dd(_ref) {
 
 /* harmony default export */ var dd = (dd_Dd);
 // EXTERNAL MODULE: ./node_modules/react-is/index.js
-var react_is = __webpack_require__(4);
+var react_is = __webpack_require__(5);
 
 // EXTERNAL MODULE: ./node_modules/shallowequal/index.js
-var shallowequal = __webpack_require__(18);
+var shallowequal = __webpack_require__(20);
 var shallowequal_default = /*#__PURE__*/__webpack_require__.n(shallowequal);
 
 // CONCATENATED MODULE: ./node_modules/@emotion/stylis/dist/stylis.esm.js
@@ -7189,11 +9091,11 @@ var index = memoize_esm(function (prop) {
 /* harmony default export */ var is_prop_valid_esm = (index);
 
 // EXTERNAL MODULE: ./node_modules/hoist-non-react-statics/dist/hoist-non-react-statics.cjs.js
-var hoist_non_react_statics_cjs = __webpack_require__(9);
+var hoist_non_react_statics_cjs = __webpack_require__(10);
 var hoist_non_react_statics_cjs_default = /*#__PURE__*/__webpack_require__.n(hoist_non_react_statics_cjs);
 
 // CONCATENATED MODULE: ./node_modules/styled-components/dist/styled-components.esm.js
-function v(){return(v=Object.assign||function(e){for(var t=1;t<arguments.length;t++){var n=arguments[t];for(var r in n)Object.prototype.hasOwnProperty.call(n,r)&&(e[r]=n[r])}return e}).apply(this,arguments)}var styled_components_esm_y=function(e,t){for(var n=[e[0]],r=0,o=t.length;r<o;r+=1)n.push(t[r],e[r+1]);return n},styled_components_esm_g=function(t){return null!==t&&"object"==typeof t&&"[object Object]"===(t.toString?t.toString():Object.prototype.toString.call(t))&&!Object(react_is["typeOf"])(t)},styled_components_esm_S=Object.freeze([]),w=Object.freeze({});function E(e){return"function"==typeof e}function styled_components_esm_b(e){return false||e.displayName||e.name||"Component"}function styled_components_esm_N(e){return e&&"string"==typeof e.styledComponentId}var styled_components_esm_="undefined"!=typeof process&&(process.env.REACT_APP_SC_ATTR||process.env.SC_ATTR)||"data-styled",styled_components_esm_C="5.2.1",styled_components_esm_A="undefined"!=typeof window&&"HTMLElement"in window,styled_components_esm_I=Boolean("boolean"==typeof SC_DISABLE_SPEEDY?SC_DISABLE_SPEEDY:"undefined"!=typeof process&&void 0!==process.env.REACT_APP_SC_DISABLE_SPEEDY&&""!==process.env.REACT_APP_SC_DISABLE_SPEEDY?"false"!==process.env.REACT_APP_SC_DISABLE_SPEEDY&&process.env.REACT_APP_SC_DISABLE_SPEEDY:"undefined"!=typeof process&&void 0!==process.env.SC_DISABLE_SPEEDY&&""!==process.env.SC_DISABLE_SPEEDY?"false"!==process.env.SC_DISABLE_SPEEDY&&process.env.SC_DISABLE_SPEEDY:"production"!=="production"),styled_components_esm_P={},styled_components_esm_O= false?undefined:{};function R(){for(var e=arguments.length<=0?void 0:arguments[0],t=[],n=1,r=arguments.length;n<r;n+=1)t.push(n<0||arguments.length<=n?void 0:arguments[n]);return t.forEach((function(t){e=e.replace(/%[a-z]/,t)})),e}function D(e){for(var t=arguments.length,n=new Array(t>1?t-1:0),r=1;r<t;r++)n[r-1]=arguments[r];throw true?new Error("An error occurred. See https://git.io/JUIaE#"+e+" for more information."+(n.length>0?" Args: "+n.join(", "):"")):undefined}var j=function(){function e(e){this.groupSizes=new Uint32Array(512),this.length=512,this.tag=e}var t=e.prototype;return t.indexOfGroup=function(e){for(var t=0,n=0;n<e;n++)t+=this.groupSizes[n];return t},t.insertRules=function(e,t){if(e>=this.groupSizes.length){for(var n=this.groupSizes,r=n.length,o=r;e>=o;)(o<<=1)<0&&D(16,""+e);this.groupSizes=new Uint32Array(o),this.groupSizes.set(n),this.length=o;for(var s=r;s<o;s++)this.groupSizes[s]=0}for(var i=this.indexOfGroup(e+1),a=0,c=t.length;a<c;a++)this.tag.insertRule(i,t[a])&&(this.groupSizes[e]++,i++)},t.clearGroup=function(e){if(e<this.length){var t=this.groupSizes[e],n=this.indexOfGroup(e),r=n+t;this.groupSizes[e]=0;for(var o=n;o<r;o++)this.tag.deleteRule(n)}},t.getGroup=function(e){var t="";if(e>=this.length||0===this.groupSizes[e])return t;for(var n=this.groupSizes[e],r=this.indexOfGroup(e),o=r+n,s=r;s<o;s++)t+=this.tag.getRule(s)+"/*!sc*/\n";return t},e}(),T=new Map,x=new Map,k=1,V=function(e){if(T.has(e))return T.get(e);for(;x.has(k);)k++;var t=k++;return false&&false,T.set(e,t),x.set(t,e),t},M=function(e){return x.get(e)},styled_components_esm_B=function(e,t){T.set(e,t),x.set(t,e)},z="style["+styled_components_esm_+'][data-styled-version="5.2.1"]',L=new RegExp("^"+styled_components_esm_+'\\.g(\\d+)\\[id="([\\w\\d-]+)"\\].*?"([^"]*)'),G=function(e,t,n){for(var r,o=n.split(","),s=0,i=o.length;s<i;s++)(r=o[s])&&e.registerName(t,r)},F=function(e,t){for(var n=t.innerHTML.split("/*!sc*/\n"),r=[],o=0,s=n.length;o<s;o++){var i=n[o].trim();if(i){var a=i.match(L);if(a){var c=0|parseInt(a[1],10),u=a[2];0!==c&&(styled_components_esm_B(u,c),G(e,u,a[3]),e.getTag().insertRules(c,r)),r.length=0}else r.push(i)}}},Y=function(){return true?__webpack_require__.nc:undefined},q=function(e){var t=document.head,n=e||t,r=document.createElement("style"),o=function(e){for(var t=e.childNodes,n=t.length;n>=0;n--){var r=t[n];if(r&&1===r.nodeType&&r.hasAttribute(styled_components_esm_))return r}}(n),s=void 0!==o?o.nextSibling:null;r.setAttribute(styled_components_esm_,"active"),r.setAttribute("data-styled-version","5.2.1");var i=Y();return i&&r.setAttribute("nonce",i),n.insertBefore(r,s),r},H=function(){function e(e){var t=this.element=q(e);t.appendChild(document.createTextNode("")),this.sheet=function(e){if(e.sheet)return e.sheet;for(var t=document.styleSheets,n=0,r=t.length;n<r;n++){var o=t[n];if(o.ownerNode===e)return o}D(17)}(t),this.length=0}var t=e.prototype;return t.insertRule=function(e,t){try{return this.sheet.insertRule(t,e),this.length++,!0}catch(e){return!1}},t.deleteRule=function(e){this.sheet.deleteRule(e),this.length--},t.getRule=function(e){var t=this.sheet.cssRules[e];return void 0!==t&&"string"==typeof t.cssText?t.cssText:""},e}(),$=function(){function e(e){var t=this.element=q(e);this.nodes=t.childNodes,this.length=0}var t=e.prototype;return t.insertRule=function(e,t){if(e<=this.length&&e>=0){var n=document.createTextNode(t),r=this.nodes[e];return this.element.insertBefore(n,r||null),this.length++,!0}return!1},t.deleteRule=function(e){this.element.removeChild(this.nodes[e]),this.length--},t.getRule=function(e){return e<this.length?this.nodes[e].textContent:""},e}(),W=function(){function e(e){this.rules=[],this.length=0}var t=e.prototype;return t.insertRule=function(e,t){return e<=this.length&&(this.rules.splice(e,0,t),this.length++,!0)},t.deleteRule=function(e){this.rules.splice(e,1),this.length--},t.getRule=function(e){return e<this.length?this.rules[e]:""},e}(),U=styled_components_esm_A,J={isServer:!styled_components_esm_A,useCSSOMInjection:!styled_components_esm_I},Z=function(){function e(e,t,n){void 0===e&&(e=w),void 0===t&&(t={}),this.options=v({},J,{},e),this.gs=t,this.names=new Map(n),!this.options.isServer&&styled_components_esm_A&&U&&(U=!1,function(e){for(var t=document.querySelectorAll(z),n=0,r=t.length;n<r;n++){var o=t[n];o&&"active"!==o.getAttribute(styled_components_esm_)&&(F(e,o),o.parentNode&&o.parentNode.removeChild(o))}}(this))}e.registerId=function(e){return V(e)};var t=e.prototype;return t.reconstructWithOptions=function(t,n){return void 0===n&&(n=!0),new e(v({},this.options,{},t),this.gs,n&&this.names||void 0)},t.allocateGSInstance=function(e){return this.gs[e]=(this.gs[e]||0)+1},t.getTag=function(){return this.tag||(this.tag=(n=(t=this.options).isServer,r=t.useCSSOMInjection,o=t.target,e=n?new W(o):r?new H(o):new $(o),new j(e)));var e,t,n,r,o},t.hasNameForId=function(e,t){return this.names.has(e)&&this.names.get(e).has(t)},t.registerName=function(e,t){if(V(e),this.names.has(e))this.names.get(e).add(t);else{var n=new Set;n.add(t),this.names.set(e,n)}},t.insertRules=function(e,t,n){this.registerName(e,t),this.getTag().insertRules(V(e),n)},t.clearNames=function(e){this.names.has(e)&&this.names.get(e).clear()},t.clearRules=function(e){this.getTag().clearGroup(V(e)),this.clearNames(e)},t.clearTag=function(){this.tag=void 0},t.toString=function(){return function(e){for(var t=e.getTag(),n=t.length,r="",o=0;o<n;o++){var s=M(o);if(void 0!==s){var i=e.names.get(s),a=t.getGroup(o);if(void 0!==i&&0!==a.length){var c=styled_components_esm_+".g"+o+'[id="'+s+'"]',u="";void 0!==i&&i.forEach((function(e){e.length>0&&(u+=e+",")})),r+=""+a+c+'{content:"'+u+'"}/*!sc*/\n'}}}return r}(this)},e}(),X=/(a)(d)/gi,K=function(e){return String.fromCharCode(e+(e>25?39:97))};function Q(e){var t,n="";for(t=Math.abs(e);t>52;t=t/52|0)n=K(t%52)+n;return(K(t%52)+n).replace(X,"$1-$2")}var ee=function(e,t){for(var n=t.length;n;)e=33*e^t.charCodeAt(--n);return e},te=function(e){return ee(5381,e)};function ne(e){for(var t=0;t<e.length;t+=1){var n=e[t];if(E(n)&&!styled_components_esm_N(n))return!1}return!0}var re=te("5.2.1"),oe=function(){function e(e,t,n){this.rules=e,this.staticRulesId="",this.isStatic= true&&(void 0===n||n.isStatic)&&ne(e),this.componentId=t,this.baseHash=ee(re,t),this.baseStyle=n,Z.registerId(t)}return e.prototype.generateAndInjectStyles=function(e,t,n){var r=this.componentId,o=[];if(this.baseStyle&&o.push(this.baseStyle.generateAndInjectStyles(e,t,n)),this.isStatic&&!n.hash)if(this.staticRulesId&&t.hasNameForId(r,this.staticRulesId))o.push(this.staticRulesId);else{var s=Ne(this.rules,e,t,n).join(""),i=Q(ee(this.baseHash,s.length)>>>0);if(!t.hasNameForId(r,i)){var a=n(s,"."+i,void 0,r);t.insertRules(r,i,a)}o.push(i),this.staticRulesId=i}else{for(var c=this.rules.length,u=ee(this.baseHash,n.hash),l="",d=0;d<c;d++){var h=this.rules[d];if("string"==typeof h)l+=h, false&&(false);else if(h){var p=Ne(h,e,t,n),f=Array.isArray(p)?p.join(""):p;u=ee(u,f+d),l+=f}}if(l){var m=Q(u>>>0);if(!t.hasNameForId(r,m)){var v=n(l,"."+m,void 0,r);t.insertRules(r,m,v)}o.push(m)}}return o.join(" ")},e}(),se=/^\s*\/\/.*$/gm,ie=[":","[",".","#"];function ae(e){var t,n,r,o,s=void 0===e?w:e,i=s.options,a=void 0===i?w:i,c=s.plugins,u=void 0===c?styled_components_esm_S:c,l=new stylis_esm(a),d=[],p=function(e){function t(t){if(t)try{e(t+"}")}catch(e){}}return function(n,r,o,s,i,a,c,u,l,d){switch(n){case 1:if(0===l&&64===r.charCodeAt(0))return e(r+";"),"";break;case 2:if(0===u)return r+"/*|*/";break;case 3:switch(u){case 102:case 112:return e(o[0]+r),"";default:return r+(0===d?"/*|*/":"")}case-2:r.split("/*|*/}").forEach(t)}}}((function(e){d.push(e)})),f=function(e,r,s){return 0===r&&ie.includes(s[n.length])||s.match(o)?e:"."+t};function m(e,s,i,a){void 0===a&&(a="&");var c=e.replace(se,""),u=s&&i?i+" "+s+" { "+c+" }":c;return t=a,n=s,r=new RegExp("\\"+n+"\\b","g"),o=new RegExp("(\\"+n+"\\b){2,}"),l(i||!s?"":s,u)}return l.use([].concat(u,[function(e,t,o){2===e&&o.length&&o[0].lastIndexOf(n)>0&&(o[0]=o[0].replace(r,f))},p,function(e){if(-2===e){var t=d;return d=[],t}}])),m.hash=u.length?u.reduce((function(e,t){return t.name||D(15),ee(e,t.name)}),5381).toString():"",m}var ce=react_default.a.createContext(),ue=ce.Consumer,le=react_default.a.createContext(),de=(le.Consumer,new Z),he=ae();function pe(){return Object(react["useContext"])(ce)||de}function fe(){return Object(react["useContext"])(le)||he}function me(e){var t=Object(react["useState"])(e.stylisPlugins),n=t[0],s=t[1],c=pe(),u=Object(react["useMemo"])((function(){var t=c;return e.sheet?t=e.sheet:e.target&&(t=t.reconstructWithOptions({target:e.target},!1)),e.disableCSSOMInjection&&(t=t.reconstructWithOptions({useCSSOMInjection:!1})),t}),[e.disableCSSOMInjection,e.sheet,e.target]),l=Object(react["useMemo"])((function(){return ae({options:{prefix:!e.disableVendorPrefixes},plugins:n})}),[e.disableVendorPrefixes,n]);return Object(react["useEffect"])((function(){shallowequal_default()(n,e.stylisPlugins)||s(e.stylisPlugins)}),[e.stylisPlugins]),react_default.a.createElement(ce.Provider,{value:u},react_default.a.createElement(le.Provider,{value:l}, false?undefined:e.children))}var ve=function(){function e(e,t){var n=this;this.inject=function(e,t){void 0===t&&(t=he);var r=n.name+t.hash;e.hasNameForId(n.id,r)||e.insertRules(n.id,r,t(n.rules,r,"@keyframes"))},this.toString=function(){return D(12,String(n.name))},this.name=e,this.id="sc-keyframes-"+e,this.rules=t}return e.prototype.getName=function(e){return void 0===e&&(e=he),this.name+e.hash},e}(),ye=/([A-Z])/,ge=/([A-Z])/g,Se=/^ms-/,we=function(e){return"-"+e.toLowerCase()};function Ee(e){return ye.test(e)?e.replace(ge,we).replace(Se,"-ms-"):e}var be=function(e){return null==e||!1===e||""===e};function Ne(e,n,r,o){if(Array.isArray(e)){for(var s,i=[],a=0,c=e.length;a<c;a+=1)""!==(s=Ne(e[a],n,r,o))&&(Array.isArray(s)?i.push.apply(i,s):i.push(s));return i}if(be(e))return"";if(styled_components_esm_N(e))return"."+e.styledComponentId;if(E(e)){if("function"!=typeof(l=e)||l.prototype&&l.prototype.isReactComponent||!n)return e;var u=e(n);return false&&false,Ne(u,n,r,o)}var l;return e instanceof ve?r?(e.inject(r,o),e.getName(o)):e:styled_components_esm_g(e)?function e(t,n){var r,o,s=[];for(var i in t)t.hasOwnProperty(i)&&!be(t[i])&&(styled_components_esm_g(t[i])?s.push.apply(s,e(t[i],i)):E(t[i])?s.push(Ee(i)+":",t[i],";"):s.push(Ee(i)+": "+(r=i,null==(o=t[i])||"boolean"==typeof o||""===o?"":"number"!=typeof o||0===o||r in unitless_esm?String(o).trim():o+"px")+";"));return n?[n+" {"].concat(s,["}"]):s}(e):e.toString()}function _e(e){for(var t=arguments.length,n=new Array(t>1?t-1:0),r=1;r<t;r++)n[r-1]=arguments[r];return E(e)||styled_components_esm_g(e)?Ne(styled_components_esm_y(styled_components_esm_S,[e].concat(n))):0===n.length&&1===e.length&&"string"==typeof e[0]?e:Ne(styled_components_esm_y(e,n))}var Ce=/invalid hook call/i,Ae=new Set,Ie=function(e,t){if(false){ var n; }},Pe=function(e,t,n){return void 0===n&&(n=w),e.theme!==n.theme&&e.theme||t||n.theme},Oe=/[!"#$%&'()*+,./:;<=>?@[\\\]^`{|}~-]+/g,Re=/(^-|-$)/g;function De(e){return e.replace(Oe,"-").replace(Re,"")}var je=function(e){return Q(te(e)>>>0)};function Te(e){return"string"==typeof e&&( true||false)}var xe=function(e){return"function"==typeof e||"object"==typeof e&&null!==e&&!Array.isArray(e)},ke=function(e){return"__proto__"!==e&&"constructor"!==e&&"prototype"!==e};function Ve(e,t,n){var r=e[n];xe(t)&&xe(r)?Me(r,t):e[n]=t}function Me(e){for(var t=arguments.length,n=new Array(t>1?t-1:0),r=1;r<t;r++)n[r-1]=arguments[r];for(var o=0,s=n;o<s.length;o++){var i=s[o];if(xe(i))for(var a in i)ke(a)&&Ve(e,i[a],a)}return e}var Be=react_default.a.createContext(),ze=Be.Consumer;function Le(e){var t=Object(react["useContext"])(Be),n=Object(react["useMemo"])((function(){return function(e,t){if(!e)return D(14);if(E(e)){var n=e(t);return true?n:undefined}return Array.isArray(e)||"object"!=typeof e?D(8):t?v({},t,{},e):e}(e.theme,t)}),[e.theme,t]);return e.children?react_default.a.createElement(Be.Provider,{value:n},e.children):null}var Ge={};function Fe(e,t,n){var o=styled_components_esm_N(e),i=!Te(e),a=t.attrs,c=void 0===a?styled_components_esm_S:a,d=t.componentId,h=void 0===d?function(e,t){var n="string"!=typeof e?"sc":De(e);Ge[n]=(Ge[n]||0)+1;var r=n+"-"+je("5.2.1"+n+Ge[n]);return t?t+"-"+r:r}(t.displayName,t.parentComponentId):d,p=t.displayName,y=void 0===p?function(e){return Te(e)?"styled."+e:"Styled("+styled_components_esm_b(e)+")"}(e):p,g=t.displayName&&t.componentId?De(t.displayName)+"-"+t.componentId:t.componentId||h,_=o&&e.attrs?Array.prototype.concat(e.attrs,c).filter(Boolean):c,C=t.shouldForwardProp;o&&e.shouldForwardProp&&(C=t.shouldForwardProp?function(n,r){return e.shouldForwardProp(n,r)&&t.shouldForwardProp(n,r)}:e.shouldForwardProp);var A,I=new oe(n,g,o?e.componentStyle:void 0),P=I.isStatic&&0===c.length,O=function(e,t){return function(e,t,n,r){var o=e.attrs,i=e.componentStyle,a=e.defaultProps,c=e.foldedComponentIds,d=e.shouldForwardProp,h=e.styledComponentId,p=e.target; false&&false;var m=function(e,t,n){void 0===e&&(e=w);var r=v({},t,{theme:e}),o={};return n.forEach((function(e){var t,n,s,i=e;for(t in E(i)&&(i=i(r)),i)r[t]=o[t]="className"===t?(n=o[t],s=i[t],n&&s?n+" "+s:n||s):i[t]})),[r,o]}(Pe(t,Object(react["useContext"])(Be),a)||w,t,o),y=m[0],g=m[1],S=function(e,t,n,r){var o=pe(),s=fe(),i=t?e.generateAndInjectStyles(w,o,s):e.generateAndInjectStyles(n,o,s);return false&&false, false&&false,i}(i,r,y, false?undefined:void 0),b=n,N=g.$as||t.$as||g.as||t.as||p,_=Te(N),C=g!==t?v({},t,{},g):t,A={};for(var I in C)"$"!==I[0]&&"as"!==I&&("forwardedAs"===I?A.as=C[I]:(d?d(I,is_prop_valid_esm):!_||is_prop_valid_esm(I))&&(A[I]=C[I]));return t.style&&g.style!==t.style&&(A.style=v({},t.style,{},g.style)),A.className=Array.prototype.concat(c,h,S!==h?S:null,t.className,g.className).filter(Boolean).join(" "),A.ref=b,Object(react["createElement"])(N,A)}(A,e,t,P)};return O.displayName=y,(A=react_default.a.forwardRef(O)).attrs=_,A.componentStyle=I,A.displayName=y,A.shouldForwardProp=C,A.foldedComponentIds=o?Array.prototype.concat(e.foldedComponentIds,e.styledComponentId):styled_components_esm_S,A.styledComponentId=g,A.target=o?e.target:e,A.withComponent=function(e){var r=t.componentId,o=function(e,t){if(null==e)return{};var n,r,o={},s=Object.keys(e);for(r=0;r<s.length;r++)n=s[r],t.indexOf(n)>=0||(o[n]=e[n]);return o}(t,["componentId"]),s=r&&r+"-"+(Te(e)?e:De(styled_components_esm_b(e)));return Fe(e,v({},o,{attrs:_,componentId:s}),n)},Object.defineProperty(A,"defaultProps",{get:function(){return this._foldedDefaultProps},set:function(t){this._foldedDefaultProps=o?Me({},e.defaultProps,t):t}}), false&&(false),A.toString=function(){return"."+A.styledComponentId},i&&hoist_non_react_statics_cjs_default()(A,e,{attrs:!0,componentStyle:!0,displayName:!0,foldedComponentIds:!0,shouldForwardProp:!0,styledComponentId:!0,target:!0,withComponent:!0}),A}var Ye=function(e){return function e(t,r,o){if(void 0===o&&(o=w),!Object(react_is["isValidElementType"])(r))return D(1,String(r));var s=function(){return t(r,o,_e.apply(void 0,arguments))};return s.withConfig=function(n){return e(t,r,v({},o,{},n))},s.attrs=function(n){return e(t,r,v({},o,{attrs:Array.prototype.concat(o.attrs,n).filter(Boolean)}))},s}(Fe,e)};["a","abbr","address","area","article","aside","audio","b","base","bdi","bdo","big","blockquote","body","br","button","canvas","caption","cite","code","col","colgroup","data","datalist","dd","del","details","dfn","dialog","div","dl","dt","em","embed","fieldset","figcaption","figure","footer","form","h1","h2","h3","h4","h5","h6","head","header","hgroup","hr","html","i","iframe","img","input","ins","kbd","keygen","label","legend","li","link","main","map","mark","marquee","menu","menuitem","meta","meter","nav","noscript","object","ol","optgroup","option","output","p","param","picture","pre","progress","q","rp","rt","ruby","s","samp","script","section","select","small","source","span","strong","style","sub","summary","sup","table","tbody","td","textarea","tfoot","th","thead","time","title","tr","track","u","ul","var","video","wbr","circle","clipPath","defs","ellipse","foreignObject","g","image","line","linearGradient","marker","mask","path","pattern","polygon","polyline","radialGradient","rect","stop","svg","text","tspan"].forEach((function(e){Ye[e]=Ye(e)}));var qe=function(){function e(e,t){this.rules=e,this.componentId=t,this.isStatic=ne(e),Z.registerId(this.componentId+1)}var t=e.prototype;return t.createStyles=function(e,t,n,r){var o=r(Ne(this.rules,t,n,r).join(""),""),s=this.componentId+e;n.insertRules(s,s,o)},t.removeStyles=function(e,t){t.clearRules(this.componentId+e)},t.renderStyles=function(e,t,n,r){e>2&&Z.registerId(this.componentId+e),this.removeStyles(e,n),this.createStyles(e,t,n,r)},e}();function He(e){for(var t=arguments.length,n=new Array(t>1?t-1:0),o=1;o<t;o++)n[o-1]=arguments[o];var i=_e.apply(void 0,[e].concat(n)),a="sc-global-"+je(JSON.stringify(i)),u=new qe(i,a);function l(e){var t=pe(),n=fe(),o=Object(react["useContext"])(Be),u=Object(react["useRef"])(t.allocateGSInstance(a)).current;return false&&false, false&&false,d(u,e,t,o,n),null}function d(e,t,n,r,o){if(u.isStatic)u.renderStyles(e,styled_components_esm_P,n,o);else{var s=v({},t,{theme:Pe(t,r,l.defaultProps)});u.renderStyles(e,s,n,o)}}return false&&false,react_default.a.memo(l)}function $e(e){ false&&false;for(var t=arguments.length,n=new Array(t>1?t-1:0),r=1;r<t;r++)n[r-1]=arguments[r];var o=_e.apply(void 0,[e].concat(n)).join(""),s=je(o);return new ve(s,o)}var We=/^\s*<\/[a-z]/i,Ue=function(){function e(){var e=this;this._emitSheetCSS=function(){var t=e.instance.toString(),n=Y();return"<style "+[n&&'nonce="'+n+'"',styled_components_esm_+'="true"','data-styled-version="5.2.1"'].filter(Boolean).join(" ")+">"+t+"</style>"},this.getStyleTags=function(){return e.sealed?D(2):e._emitSheetCSS()},this.getStyleElement=function(){var t;if(e.sealed)return D(2);var n=((t={})[styled_components_esm_]="",t["data-styled-version"]="5.2.1",t.dangerouslySetInnerHTML={__html:e.instance.toString()},t),o=Y();return o&&(n.nonce=o),[react_default.a.createElement("style",v({},n,{key:"sc-0-0"}))]},this.seal=function(){e.sealed=!0},this.instance=new Z({isServer:!0}),this.sealed=!1}var t=e.prototype;return t.collectStyles=function(e){return this.sealed?D(2):react_default.a.createElement(me,{sheet:this.instance},e)},t.interleaveWithNodeStream=function(e){if(styled_components_esm_A)return D(3);if(this.sealed)return D(2);this.seal();var t=__webpack_require__(12),n=(t.Readable,t.Transform),r=e,o=this.instance,s=this._emitSheetCSS,i=new n({transform:function(e,t,n){var r=e.toString(),i=s();if(o.clearTag(),We.test(r)){var a=r.indexOf(">")+1,c=r.slice(0,a),u=r.slice(a);this.push(c+i+u)}else this.push(i+r);n()}});return r.on("error",(function(e){i.emit("error",e)})),r.pipe(i)},e}(),Je=function(e){var t=react_default.a.forwardRef((function(t,n){var o=Object(react["useContext"])(Be),i=e.defaultProps,a=Pe(t,o,i);return false&&false,react_default.a.createElement(e,v({},t,{theme:a,ref:n}))}));return hoist_non_react_statics_cjs_default()(t,e),t.displayName="WithTheme("+styled_components_esm_b(e)+")",t},Ze=function(){return Object(react["useContext"])(Be)},Xe={StyleSheet:Z,masterSheet:de}; false&&false, false&&false;/* harmony default export */ var styled_components_esm = (Ye);
+function v(){return(v=Object.assign||function(e){for(var t=1;t<arguments.length;t++){var n=arguments[t];for(var r in n)Object.prototype.hasOwnProperty.call(n,r)&&(e[r]=n[r])}return e}).apply(this,arguments)}var styled_components_esm_y=function(e,t){for(var n=[e[0]],r=0,o=t.length;r<o;r+=1)n.push(t[r],e[r+1]);return n},styled_components_esm_g=function(t){return null!==t&&"object"==typeof t&&"[object Object]"===(t.toString?t.toString():Object.prototype.toString.call(t))&&!Object(react_is["typeOf"])(t)},styled_components_esm_S=Object.freeze([]),w=Object.freeze({});function E(e){return"function"==typeof e}function styled_components_esm_b(e){return false||e.displayName||e.name||"Component"}function styled_components_esm_N(e){return e&&"string"==typeof e.styledComponentId}var styled_components_esm_="undefined"!=typeof process&&(process.env.REACT_APP_SC_ATTR||process.env.SC_ATTR)||"data-styled",styled_components_esm_C="5.2.1",styled_components_esm_A="undefined"!=typeof window&&"HTMLElement"in window,styled_components_esm_I=Boolean("boolean"==typeof SC_DISABLE_SPEEDY?SC_DISABLE_SPEEDY:"undefined"!=typeof process&&void 0!==process.env.REACT_APP_SC_DISABLE_SPEEDY&&""!==process.env.REACT_APP_SC_DISABLE_SPEEDY?"false"!==process.env.REACT_APP_SC_DISABLE_SPEEDY&&process.env.REACT_APP_SC_DISABLE_SPEEDY:"undefined"!=typeof process&&void 0!==process.env.SC_DISABLE_SPEEDY&&""!==process.env.SC_DISABLE_SPEEDY?"false"!==process.env.SC_DISABLE_SPEEDY&&process.env.SC_DISABLE_SPEEDY:"production"!=="production"),styled_components_esm_P={},styled_components_esm_O= false?undefined:{};function R(){for(var e=arguments.length<=0?void 0:arguments[0],t=[],n=1,r=arguments.length;n<r;n+=1)t.push(n<0||arguments.length<=n?void 0:arguments[n]);return t.forEach((function(t){e=e.replace(/%[a-z]/,t)})),e}function D(e){for(var t=arguments.length,n=new Array(t>1?t-1:0),r=1;r<t;r++)n[r-1]=arguments[r];throw true?new Error("An error occurred. See https://git.io/JUIaE#"+e+" for more information."+(n.length>0?" Args: "+n.join(", "):"")):undefined}var j=function(){function e(e){this.groupSizes=new Uint32Array(512),this.length=512,this.tag=e}var t=e.prototype;return t.indexOfGroup=function(e){for(var t=0,n=0;n<e;n++)t+=this.groupSizes[n];return t},t.insertRules=function(e,t){if(e>=this.groupSizes.length){for(var n=this.groupSizes,r=n.length,o=r;e>=o;)(o<<=1)<0&&D(16,""+e);this.groupSizes=new Uint32Array(o),this.groupSizes.set(n),this.length=o;for(var s=r;s<o;s++)this.groupSizes[s]=0}for(var i=this.indexOfGroup(e+1),a=0,c=t.length;a<c;a++)this.tag.insertRule(i,t[a])&&(this.groupSizes[e]++,i++)},t.clearGroup=function(e){if(e<this.length){var t=this.groupSizes[e],n=this.indexOfGroup(e),r=n+t;this.groupSizes[e]=0;for(var o=n;o<r;o++)this.tag.deleteRule(n)}},t.getGroup=function(e){var t="";if(e>=this.length||0===this.groupSizes[e])return t;for(var n=this.groupSizes[e],r=this.indexOfGroup(e),o=r+n,s=r;s<o;s++)t+=this.tag.getRule(s)+"/*!sc*/\n";return t},e}(),T=new Map,x=new Map,k=1,V=function(e){if(T.has(e))return T.get(e);for(;x.has(k);)k++;var t=k++;return false&&false,T.set(e,t),x.set(t,e),t},M=function(e){return x.get(e)},styled_components_esm_B=function(e,t){T.set(e,t),x.set(t,e)},z="style["+styled_components_esm_+'][data-styled-version="5.2.1"]',L=new RegExp("^"+styled_components_esm_+'\\.g(\\d+)\\[id="([\\w\\d-]+)"\\].*?"([^"]*)'),G=function(e,t,n){for(var r,o=n.split(","),s=0,i=o.length;s<i;s++)(r=o[s])&&e.registerName(t,r)},F=function(e,t){for(var n=t.innerHTML.split("/*!sc*/\n"),r=[],o=0,s=n.length;o<s;o++){var i=n[o].trim();if(i){var a=i.match(L);if(a){var c=0|parseInt(a[1],10),u=a[2];0!==c&&(styled_components_esm_B(u,c),G(e,u,a[3]),e.getTag().insertRules(c,r)),r.length=0}else r.push(i)}}},Y=function(){return true?__webpack_require__.nc:undefined},q=function(e){var t=document.head,n=e||t,r=document.createElement("style"),o=function(e){for(var t=e.childNodes,n=t.length;n>=0;n--){var r=t[n];if(r&&1===r.nodeType&&r.hasAttribute(styled_components_esm_))return r}}(n),s=void 0!==o?o.nextSibling:null;r.setAttribute(styled_components_esm_,"active"),r.setAttribute("data-styled-version","5.2.1");var i=Y();return i&&r.setAttribute("nonce",i),n.insertBefore(r,s),r},H=function(){function e(e){var t=this.element=q(e);t.appendChild(document.createTextNode("")),this.sheet=function(e){if(e.sheet)return e.sheet;for(var t=document.styleSheets,n=0,r=t.length;n<r;n++){var o=t[n];if(o.ownerNode===e)return o}D(17)}(t),this.length=0}var t=e.prototype;return t.insertRule=function(e,t){try{return this.sheet.insertRule(t,e),this.length++,!0}catch(e){return!1}},t.deleteRule=function(e){this.sheet.deleteRule(e),this.length--},t.getRule=function(e){var t=this.sheet.cssRules[e];return void 0!==t&&"string"==typeof t.cssText?t.cssText:""},e}(),$=function(){function e(e){var t=this.element=q(e);this.nodes=t.childNodes,this.length=0}var t=e.prototype;return t.insertRule=function(e,t){if(e<=this.length&&e>=0){var n=document.createTextNode(t),r=this.nodes[e];return this.element.insertBefore(n,r||null),this.length++,!0}return!1},t.deleteRule=function(e){this.element.removeChild(this.nodes[e]),this.length--},t.getRule=function(e){return e<this.length?this.nodes[e].textContent:""},e}(),W=function(){function e(e){this.rules=[],this.length=0}var t=e.prototype;return t.insertRule=function(e,t){return e<=this.length&&(this.rules.splice(e,0,t),this.length++,!0)},t.deleteRule=function(e){this.rules.splice(e,1),this.length--},t.getRule=function(e){return e<this.length?this.rules[e]:""},e}(),U=styled_components_esm_A,J={isServer:!styled_components_esm_A,useCSSOMInjection:!styled_components_esm_I},Z=function(){function e(e,t,n){void 0===e&&(e=w),void 0===t&&(t={}),this.options=v({},J,{},e),this.gs=t,this.names=new Map(n),!this.options.isServer&&styled_components_esm_A&&U&&(U=!1,function(e){for(var t=document.querySelectorAll(z),n=0,r=t.length;n<r;n++){var o=t[n];o&&"active"!==o.getAttribute(styled_components_esm_)&&(F(e,o),o.parentNode&&o.parentNode.removeChild(o))}}(this))}e.registerId=function(e){return V(e)};var t=e.prototype;return t.reconstructWithOptions=function(t,n){return void 0===n&&(n=!0),new e(v({},this.options,{},t),this.gs,n&&this.names||void 0)},t.allocateGSInstance=function(e){return this.gs[e]=(this.gs[e]||0)+1},t.getTag=function(){return this.tag||(this.tag=(n=(t=this.options).isServer,r=t.useCSSOMInjection,o=t.target,e=n?new W(o):r?new H(o):new $(o),new j(e)));var e,t,n,r,o},t.hasNameForId=function(e,t){return this.names.has(e)&&this.names.get(e).has(t)},t.registerName=function(e,t){if(V(e),this.names.has(e))this.names.get(e).add(t);else{var n=new Set;n.add(t),this.names.set(e,n)}},t.insertRules=function(e,t,n){this.registerName(e,t),this.getTag().insertRules(V(e),n)},t.clearNames=function(e){this.names.has(e)&&this.names.get(e).clear()},t.clearRules=function(e){this.getTag().clearGroup(V(e)),this.clearNames(e)},t.clearTag=function(){this.tag=void 0},t.toString=function(){return function(e){for(var t=e.getTag(),n=t.length,r="",o=0;o<n;o++){var s=M(o);if(void 0!==s){var i=e.names.get(s),a=t.getGroup(o);if(void 0!==i&&0!==a.length){var c=styled_components_esm_+".g"+o+'[id="'+s+'"]',u="";void 0!==i&&i.forEach((function(e){e.length>0&&(u+=e+",")})),r+=""+a+c+'{content:"'+u+'"}/*!sc*/\n'}}}return r}(this)},e}(),X=/(a)(d)/gi,K=function(e){return String.fromCharCode(e+(e>25?39:97))};function Q(e){var t,n="";for(t=Math.abs(e);t>52;t=t/52|0)n=K(t%52)+n;return(K(t%52)+n).replace(X,"$1-$2")}var ee=function(e,t){for(var n=t.length;n;)e=33*e^t.charCodeAt(--n);return e},te=function(e){return ee(5381,e)};function ne(e){for(var t=0;t<e.length;t+=1){var n=e[t];if(E(n)&&!styled_components_esm_N(n))return!1}return!0}var re=te("5.2.1"),oe=function(){function e(e,t,n){this.rules=e,this.staticRulesId="",this.isStatic= true&&(void 0===n||n.isStatic)&&ne(e),this.componentId=t,this.baseHash=ee(re,t),this.baseStyle=n,Z.registerId(t)}return e.prototype.generateAndInjectStyles=function(e,t,n){var r=this.componentId,o=[];if(this.baseStyle&&o.push(this.baseStyle.generateAndInjectStyles(e,t,n)),this.isStatic&&!n.hash)if(this.staticRulesId&&t.hasNameForId(r,this.staticRulesId))o.push(this.staticRulesId);else{var s=Ne(this.rules,e,t,n).join(""),i=Q(ee(this.baseHash,s.length)>>>0);if(!t.hasNameForId(r,i)){var a=n(s,"."+i,void 0,r);t.insertRules(r,i,a)}o.push(i),this.staticRulesId=i}else{for(var c=this.rules.length,u=ee(this.baseHash,n.hash),l="",d=0;d<c;d++){var h=this.rules[d];if("string"==typeof h)l+=h, false&&(false);else if(h){var p=Ne(h,e,t,n),f=Array.isArray(p)?p.join(""):p;u=ee(u,f+d),l+=f}}if(l){var m=Q(u>>>0);if(!t.hasNameForId(r,m)){var v=n(l,"."+m,void 0,r);t.insertRules(r,m,v)}o.push(m)}}return o.join(" ")},e}(),se=/^\s*\/\/.*$/gm,ie=[":","[",".","#"];function ae(e){var t,n,r,o,s=void 0===e?w:e,i=s.options,a=void 0===i?w:i,c=s.plugins,u=void 0===c?styled_components_esm_S:c,l=new stylis_esm(a),d=[],p=function(e){function t(t){if(t)try{e(t+"}")}catch(e){}}return function(n,r,o,s,i,a,c,u,l,d){switch(n){case 1:if(0===l&&64===r.charCodeAt(0))return e(r+";"),"";break;case 2:if(0===u)return r+"/*|*/";break;case 3:switch(u){case 102:case 112:return e(o[0]+r),"";default:return r+(0===d?"/*|*/":"")}case-2:r.split("/*|*/}").forEach(t)}}}((function(e){d.push(e)})),f=function(e,r,s){return 0===r&&ie.includes(s[n.length])||s.match(o)?e:"."+t};function m(e,s,i,a){void 0===a&&(a="&");var c=e.replace(se,""),u=s&&i?i+" "+s+" { "+c+" }":c;return t=a,n=s,r=new RegExp("\\"+n+"\\b","g"),o=new RegExp("(\\"+n+"\\b){2,}"),l(i||!s?"":s,u)}return l.use([].concat(u,[function(e,t,o){2===e&&o.length&&o[0].lastIndexOf(n)>0&&(o[0]=o[0].replace(r,f))},p,function(e){if(-2===e){var t=d;return d=[],t}}])),m.hash=u.length?u.reduce((function(e,t){return t.name||D(15),ee(e,t.name)}),5381).toString():"",m}var ce=react_default.a.createContext(),ue=ce.Consumer,le=react_default.a.createContext(),de=(le.Consumer,new Z),he=ae();function pe(){return Object(react["useContext"])(ce)||de}function fe(){return Object(react["useContext"])(le)||he}function me(e){var t=Object(react["useState"])(e.stylisPlugins),n=t[0],s=t[1],c=pe(),u=Object(react["useMemo"])((function(){var t=c;return e.sheet?t=e.sheet:e.target&&(t=t.reconstructWithOptions({target:e.target},!1)),e.disableCSSOMInjection&&(t=t.reconstructWithOptions({useCSSOMInjection:!1})),t}),[e.disableCSSOMInjection,e.sheet,e.target]),l=Object(react["useMemo"])((function(){return ae({options:{prefix:!e.disableVendorPrefixes},plugins:n})}),[e.disableVendorPrefixes,n]);return Object(react["useEffect"])((function(){shallowequal_default()(n,e.stylisPlugins)||s(e.stylisPlugins)}),[e.stylisPlugins]),react_default.a.createElement(ce.Provider,{value:u},react_default.a.createElement(le.Provider,{value:l}, false?undefined:e.children))}var ve=function(){function e(e,t){var n=this;this.inject=function(e,t){void 0===t&&(t=he);var r=n.name+t.hash;e.hasNameForId(n.id,r)||e.insertRules(n.id,r,t(n.rules,r,"@keyframes"))},this.toString=function(){return D(12,String(n.name))},this.name=e,this.id="sc-keyframes-"+e,this.rules=t}return e.prototype.getName=function(e){return void 0===e&&(e=he),this.name+e.hash},e}(),ye=/([A-Z])/,ge=/([A-Z])/g,Se=/^ms-/,we=function(e){return"-"+e.toLowerCase()};function Ee(e){return ye.test(e)?e.replace(ge,we).replace(Se,"-ms-"):e}var be=function(e){return null==e||!1===e||""===e};function Ne(e,n,r,o){if(Array.isArray(e)){for(var s,i=[],a=0,c=e.length;a<c;a+=1)""!==(s=Ne(e[a],n,r,o))&&(Array.isArray(s)?i.push.apply(i,s):i.push(s));return i}if(be(e))return"";if(styled_components_esm_N(e))return"."+e.styledComponentId;if(E(e)){if("function"!=typeof(l=e)||l.prototype&&l.prototype.isReactComponent||!n)return e;var u=e(n);return false&&false,Ne(u,n,r,o)}var l;return e instanceof ve?r?(e.inject(r,o),e.getName(o)):e:styled_components_esm_g(e)?function e(t,n){var r,o,s=[];for(var i in t)t.hasOwnProperty(i)&&!be(t[i])&&(styled_components_esm_g(t[i])?s.push.apply(s,e(t[i],i)):E(t[i])?s.push(Ee(i)+":",t[i],";"):s.push(Ee(i)+": "+(r=i,null==(o=t[i])||"boolean"==typeof o||""===o?"":"number"!=typeof o||0===o||r in unitless_esm?String(o).trim():o+"px")+";"));return n?[n+" {"].concat(s,["}"]):s}(e):e.toString()}function _e(e){for(var t=arguments.length,n=new Array(t>1?t-1:0),r=1;r<t;r++)n[r-1]=arguments[r];return E(e)||styled_components_esm_g(e)?Ne(styled_components_esm_y(styled_components_esm_S,[e].concat(n))):0===n.length&&1===e.length&&"string"==typeof e[0]?e:Ne(styled_components_esm_y(e,n))}var Ce=/invalid hook call/i,Ae=new Set,Ie=function(e,t){if(false){ var n; }},Pe=function(e,t,n){return void 0===n&&(n=w),e.theme!==n.theme&&e.theme||t||n.theme},Oe=/[!"#$%&'()*+,./:;<=>?@[\\\]^`{|}~-]+/g,Re=/(^-|-$)/g;function De(e){return e.replace(Oe,"-").replace(Re,"")}var je=function(e){return Q(te(e)>>>0)};function Te(e){return"string"==typeof e&&( true||false)}var xe=function(e){return"function"==typeof e||"object"==typeof e&&null!==e&&!Array.isArray(e)},ke=function(e){return"__proto__"!==e&&"constructor"!==e&&"prototype"!==e};function Ve(e,t,n){var r=e[n];xe(t)&&xe(r)?Me(r,t):e[n]=t}function Me(e){for(var t=arguments.length,n=new Array(t>1?t-1:0),r=1;r<t;r++)n[r-1]=arguments[r];for(var o=0,s=n;o<s.length;o++){var i=s[o];if(xe(i))for(var a in i)ke(a)&&Ve(e,i[a],a)}return e}var Be=react_default.a.createContext(),ze=Be.Consumer;function Le(e){var t=Object(react["useContext"])(Be),n=Object(react["useMemo"])((function(){return function(e,t){if(!e)return D(14);if(E(e)){var n=e(t);return true?n:undefined}return Array.isArray(e)||"object"!=typeof e?D(8):t?v({},t,{},e):e}(e.theme,t)}),[e.theme,t]);return e.children?react_default.a.createElement(Be.Provider,{value:n},e.children):null}var Ge={};function Fe(e,t,n){var o=styled_components_esm_N(e),i=!Te(e),a=t.attrs,c=void 0===a?styled_components_esm_S:a,d=t.componentId,h=void 0===d?function(e,t){var n="string"!=typeof e?"sc":De(e);Ge[n]=(Ge[n]||0)+1;var r=n+"-"+je("5.2.1"+n+Ge[n]);return t?t+"-"+r:r}(t.displayName,t.parentComponentId):d,p=t.displayName,y=void 0===p?function(e){return Te(e)?"styled."+e:"Styled("+styled_components_esm_b(e)+")"}(e):p,g=t.displayName&&t.componentId?De(t.displayName)+"-"+t.componentId:t.componentId||h,_=o&&e.attrs?Array.prototype.concat(e.attrs,c).filter(Boolean):c,C=t.shouldForwardProp;o&&e.shouldForwardProp&&(C=t.shouldForwardProp?function(n,r){return e.shouldForwardProp(n,r)&&t.shouldForwardProp(n,r)}:e.shouldForwardProp);var A,I=new oe(n,g,o?e.componentStyle:void 0),P=I.isStatic&&0===c.length,O=function(e,t){return function(e,t,n,r){var o=e.attrs,i=e.componentStyle,a=e.defaultProps,c=e.foldedComponentIds,d=e.shouldForwardProp,h=e.styledComponentId,p=e.target; false&&false;var m=function(e,t,n){void 0===e&&(e=w);var r=v({},t,{theme:e}),o={};return n.forEach((function(e){var t,n,s,i=e;for(t in E(i)&&(i=i(r)),i)r[t]=o[t]="className"===t?(n=o[t],s=i[t],n&&s?n+" "+s:n||s):i[t]})),[r,o]}(Pe(t,Object(react["useContext"])(Be),a)||w,t,o),y=m[0],g=m[1],S=function(e,t,n,r){var o=pe(),s=fe(),i=t?e.generateAndInjectStyles(w,o,s):e.generateAndInjectStyles(n,o,s);return false&&false, false&&false,i}(i,r,y, false?undefined:void 0),b=n,N=g.$as||t.$as||g.as||t.as||p,_=Te(N),C=g!==t?v({},t,{},g):t,A={};for(var I in C)"$"!==I[0]&&"as"!==I&&("forwardedAs"===I?A.as=C[I]:(d?d(I,is_prop_valid_esm):!_||is_prop_valid_esm(I))&&(A[I]=C[I]));return t.style&&g.style!==t.style&&(A.style=v({},t.style,{},g.style)),A.className=Array.prototype.concat(c,h,S!==h?S:null,t.className,g.className).filter(Boolean).join(" "),A.ref=b,Object(react["createElement"])(N,A)}(A,e,t,P)};return O.displayName=y,(A=react_default.a.forwardRef(O)).attrs=_,A.componentStyle=I,A.displayName=y,A.shouldForwardProp=C,A.foldedComponentIds=o?Array.prototype.concat(e.foldedComponentIds,e.styledComponentId):styled_components_esm_S,A.styledComponentId=g,A.target=o?e.target:e,A.withComponent=function(e){var r=t.componentId,o=function(e,t){if(null==e)return{};var n,r,o={},s=Object.keys(e);for(r=0;r<s.length;r++)n=s[r],t.indexOf(n)>=0||(o[n]=e[n]);return o}(t,["componentId"]),s=r&&r+"-"+(Te(e)?e:De(styled_components_esm_b(e)));return Fe(e,v({},o,{attrs:_,componentId:s}),n)},Object.defineProperty(A,"defaultProps",{get:function(){return this._foldedDefaultProps},set:function(t){this._foldedDefaultProps=o?Me({},e.defaultProps,t):t}}), false&&(false),A.toString=function(){return"."+A.styledComponentId},i&&hoist_non_react_statics_cjs_default()(A,e,{attrs:!0,componentStyle:!0,displayName:!0,foldedComponentIds:!0,shouldForwardProp:!0,styledComponentId:!0,target:!0,withComponent:!0}),A}var Ye=function(e){return function e(t,r,o){if(void 0===o&&(o=w),!Object(react_is["isValidElementType"])(r))return D(1,String(r));var s=function(){return t(r,o,_e.apply(void 0,arguments))};return s.withConfig=function(n){return e(t,r,v({},o,{},n))},s.attrs=function(n){return e(t,r,v({},o,{attrs:Array.prototype.concat(o.attrs,n).filter(Boolean)}))},s}(Fe,e)};["a","abbr","address","area","article","aside","audio","b","base","bdi","bdo","big","blockquote","body","br","button","canvas","caption","cite","code","col","colgroup","data","datalist","dd","del","details","dfn","dialog","div","dl","dt","em","embed","fieldset","figcaption","figure","footer","form","h1","h2","h3","h4","h5","h6","head","header","hgroup","hr","html","i","iframe","img","input","ins","kbd","keygen","label","legend","li","link","main","map","mark","marquee","menu","menuitem","meta","meter","nav","noscript","object","ol","optgroup","option","output","p","param","picture","pre","progress","q","rp","rt","ruby","s","samp","script","section","select","small","source","span","strong","style","sub","summary","sup","table","tbody","td","textarea","tfoot","th","thead","time","title","tr","track","u","ul","var","video","wbr","circle","clipPath","defs","ellipse","foreignObject","g","image","line","linearGradient","marker","mask","path","pattern","polygon","polyline","radialGradient","rect","stop","svg","text","tspan"].forEach((function(e){Ye[e]=Ye(e)}));var qe=function(){function e(e,t){this.rules=e,this.componentId=t,this.isStatic=ne(e),Z.registerId(this.componentId+1)}var t=e.prototype;return t.createStyles=function(e,t,n,r){var o=r(Ne(this.rules,t,n,r).join(""),""),s=this.componentId+e;n.insertRules(s,s,o)},t.removeStyles=function(e,t){t.clearRules(this.componentId+e)},t.renderStyles=function(e,t,n,r){e>2&&Z.registerId(this.componentId+e),this.removeStyles(e,n),this.createStyles(e,t,n,r)},e}();function He(e){for(var t=arguments.length,n=new Array(t>1?t-1:0),o=1;o<t;o++)n[o-1]=arguments[o];var i=_e.apply(void 0,[e].concat(n)),a="sc-global-"+je(JSON.stringify(i)),u=new qe(i,a);function l(e){var t=pe(),n=fe(),o=Object(react["useContext"])(Be),u=Object(react["useRef"])(t.allocateGSInstance(a)).current;return false&&false, false&&false,d(u,e,t,o,n),null}function d(e,t,n,r,o){if(u.isStatic)u.renderStyles(e,styled_components_esm_P,n,o);else{var s=v({},t,{theme:Pe(t,r,l.defaultProps)});u.renderStyles(e,s,n,o)}}return false&&false,react_default.a.memo(l)}function $e(e){ false&&false;for(var t=arguments.length,n=new Array(t>1?t-1:0),r=1;r<t;r++)n[r-1]=arguments[r];var o=_e.apply(void 0,[e].concat(n)).join(""),s=je(o);return new ve(s,o)}var We=/^\s*<\/[a-z]/i,Ue=function(){function e(){var e=this;this._emitSheetCSS=function(){var t=e.instance.toString(),n=Y();return"<style "+[n&&'nonce="'+n+'"',styled_components_esm_+'="true"','data-styled-version="5.2.1"'].filter(Boolean).join(" ")+">"+t+"</style>"},this.getStyleTags=function(){return e.sealed?D(2):e._emitSheetCSS()},this.getStyleElement=function(){var t;if(e.sealed)return D(2);var n=((t={})[styled_components_esm_]="",t["data-styled-version"]="5.2.1",t.dangerouslySetInnerHTML={__html:e.instance.toString()},t),o=Y();return o&&(n.nonce=o),[react_default.a.createElement("style",v({},n,{key:"sc-0-0"}))]},this.seal=function(){e.sealed=!0},this.instance=new Z({isServer:!0}),this.sealed=!1}var t=e.prototype;return t.collectStyles=function(e){return this.sealed?D(2):react_default.a.createElement(me,{sheet:this.instance},e)},t.interleaveWithNodeStream=function(e){if(styled_components_esm_A)return D(3);if(this.sealed)return D(2);this.seal();var t=__webpack_require__(14),n=(t.Readable,t.Transform),r=e,o=this.instance,s=this._emitSheetCSS,i=new n({transform:function(e,t,n){var r=e.toString(),i=s();if(o.clearTag(),We.test(r)){var a=r.indexOf(">")+1,c=r.slice(0,a),u=r.slice(a);this.push(c+i+u)}else this.push(i+r);n()}});return r.on("error",(function(e){i.emit("error",e)})),r.pipe(i)},e}(),Je=function(e){var t=react_default.a.forwardRef((function(t,n){var o=Object(react["useContext"])(Be),i=e.defaultProps,a=Pe(t,o,i);return false&&false,react_default.a.createElement(e,v({},t,{theme:a,ref:n}))}));return hoist_non_react_statics_cjs_default()(t,e),t.displayName="WithTheme("+styled_components_esm_b(e)+")",t},Ze=function(){return Object(react["useContext"])(Be)},Xe={StyleSheet:Z,masterSheet:de}; false&&false, false&&false;/* harmony default export */ var styled_components_esm = (Ye);
 //# sourceMappingURL=styled-components.esm.js.map
 
 // CONCATENATED MODULE: ./src/components/Dl.js
@@ -7659,16 +9561,21 @@ var App_App = function App(_ref) {
   }), /*#__PURE__*/react_default.a.createElement("link", {
     href: "https://fonts.googleapis.com/css2?family=Libre+Baskerville:ital,wght@0,400;0,700;1,400&family=Source+Sans+Pro:ital,wght@0,400;0,700;1,400;1,700&display=swap",
     rel: "stylesheet"
-  })), /*#__PURE__*/react_default.a.createElement("body", null, /*#__PURE__*/react_default.a.createElement(Wrapper, null, /*#__PURE__*/react_default.a.createElement("div", null, renderTree(inflate(parse(content)))))));
+  })), /*#__PURE__*/react_default.a.createElement("body", null, /*#__PURE__*/react_default.a.createElement(Wrapper, null, /*#__PURE__*/react_default.a.createElement("div", null, renderTree(inflate(parse(content)))), /*#__PURE__*/react_default.a.createElement("small", {
+    style: {
+      textAlign: "center",
+      display: "block"
+    }
+  }, "Generated: ", new Date().toISOString()))));
 };
 
 /* harmony default export */ var src_App = (App_App);
 // EXTERNAL MODULE: ./node_modules/react-dom/server.js
-var server = __webpack_require__(19);
+var server = __webpack_require__(21);
 var server_default = /*#__PURE__*/__webpack_require__.n(server);
 
 // EXTERNAL MODULE: ./node_modules/glob/glob.js
-var glob = __webpack_require__(8);
+var glob = __webpack_require__(9);
 var glob_default = /*#__PURE__*/__webpack_require__.n(glob);
 
 // CONCATENATED MODULE: ./src/index.js
@@ -7680,22 +9587,41 @@ var glob_default = /*#__PURE__*/__webpack_require__.n(glob);
 
 
 
-var OUT_DIR = external_path_default.a.join(process.cwd(), "./output/");
 
-if (!external_fs_default.a.existsSync(OUT_DIR)) {
-  external_fs_default.a.mkdirSync(OUT_DIR);
-}
+commander["program"].version(__webpack_require__(45)["version"]);
+commander["program"].command("img").option("-C, --compress", "compress", "true");
+commander["program"].command("render [path...]").description("Render files").option("-O, --output <path>", "change the output directory", "./output").option("-F, --force", "force a re-render", "false").action(function (files, options) {
+  console.log(process.argv);
+  console.log(files);
+  console.log(options.output);
+  console.log(options.force);
+  var OUT_DIR = external_path_default.a.join(process.cwd(), options.output);
 
-console.log(source_default.a.blueBright("👋🏻 Heyo. Artikel is looking for your notes..."));
-console.log(source_default.a.green("Looking for *.art"));
-glob_default()(external_path_default.a.join(process.cwd(), "./*.art"), {}, function (err, files) {
-  if (err) {
-    console.log(source_default.a.redBright("😫 Oh no something went wrong: " + err));
-    return;
+  if (!external_fs_default.a.existsSync(OUT_DIR)) {
+    external_fs_default.a.mkdirSync(OUT_DIR);
   }
 
+  console.log(source_default.a.blueBright("👋🏻 Heyo. Artikel is looking for your notes..."));
+
+  if (files.length == 0) {
+    console.log(source_default.a.green("No specific file specified... looking for any *.art"));
+    glob_default()(external_path_default.a.join(process.cwd(), "./*.art"), {}, function (err, files) {
+      if (err) {
+        console.error(source_default.a.redBright("😫 Oh no something went wrong: " + err));
+        return;
+      }
+
+      src_render(files, OUT_DIR);
+    });
+  } else {
+    src_render(files, OUT_DIR);
+  }
+});
+commander["program"].parse(process.argv);
+
+var src_render = function render(files, out_dir) {
   files.forEach(function (item) {
-    console.log(source_default.a.dim("✍🏻 Converting note: " + item));
+    process.stdout.write(source_default.a.dim("\u270D\uD83C\uDFFB Converting note: \"".concat(item, "\"... \t\t")));
     var content = external_fs_default.a.readFileSync(item).toString();
     var sheet = new Ue();
     var output = server_default.a.renderToStaticMarkup(sheet.collectStyles( /*#__PURE__*/react_default.a.createElement(src_App, {
@@ -7703,10 +9629,11 @@ glob_default()(external_path_default.a.join(process.cwd(), "./*.art"), {}, funct
       content: content
     })));
     output += sheet.getStyleTags();
-    external_fs_default.a.writeFileSync(external_path_default.a.join(OUT_DIR, external_path_default.a.basename(item, "art") + "html"), output);
-    console.log(source_default.a.dim("👍 Converting done: " + item));
+    var finalPath = external_path_default.a.join(out_dir, external_path_default.a.basename(item, "art") + "html");
+    external_fs_default.a.writeFileSync(finalPath, output);
+    console.log(source_default.a.dim(" Done! Written to: ".concat(finalPath)));
   });
-});
+};
 
 /***/ })
 /******/ ]);

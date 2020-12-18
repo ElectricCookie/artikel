@@ -48,6 +48,7 @@ const App = ({ content, title }) => {
       <body>
         <Wrapper>
           <div>{renderItem(inflate(parse(content)))}</div>
+          <small style={{textAlign: "center", display: "block"}}>Generated: {new Date().toISOString()}</small>
         </Wrapper>
       </body>
     </html>
