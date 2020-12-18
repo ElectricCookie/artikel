@@ -31,17 +31,14 @@
     "autoprefixer": "^9.3.1",
     "babel-loader": "^8.2.2",
     "chalk": "^4.1.0",
-    "chokidar": "^3.4.3",
     "clipboardy": "^2.3.0",
     "express": "^4.17.1",
     "file-loader": "^6.2.0",
     "glob": "^7.1.6",
     "react": "^17.0.1",
     "react-dom": "^17.0.1",
-    "style-loader": "^0.23.1",
     "styled-components": "^5.2.1",
     "webpack": "^4.44.2",
-    "webpack-cli": "^3.3.12",
-    "ws": "^7.4.0"
+    "webpack-cli": "^3.3.12"
   }
 }

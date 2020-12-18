@@ -36,6 +36,9 @@ const staticConfig = {
         exclude: /node_modules(?!\/ansi-regex)(?!\/strip-ansi)/,
         use: {
           loader: "babel-loader",
+          options: {
+            presets: ["@babel/preset-env","@babel/react"]
+          }
         },
       },
       {
