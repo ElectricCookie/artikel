@@ -7,7 +7,7 @@
     "artikel": "index.js"
   },
   "scripts": {
-    "build": "webpack -p",
+    "build": "webpack",
     "html": "node ./dist/render.js",
     "clean": "rm -rf ./dist/",
     "render": "npm run build && npm run html && npm run clean"
@@ -23,23 +23,20 @@
   },
   "homepage": "https://github.com/ElectricCookie/artikel#readme",
   "devDependencies": {
-    "@babel/cli": "^7.12.10",
     "@babel/core": "^7.12.10",
     "@babel/preset-env": "^7.12.11",
     "@babel/preset-react": "^7.12.10",
-    "webpack": "^4.44.2",
-    "webpack-cli": "^3.3.12"
+    "babel-loader": "^8.2.2",
+    "react": "^17.0.1",
+    "react-dom": "^17.0.1",
+    "styled-components": "^5.2.1",
+    "webpack": "^5.11.0",
+    "webpack-cli": "^4.2.0"
   },
   "dependencies": {
-    "babel-loader": "^8.2.2",
     "chalk": "^4.1.0",
     "clipboardy": "^2.3.0",
     "commander": "^6.2.1",
-    "express": "^4.17.1",
-    "file-loader": "^6.2.0",
-    "glob": "^7.1.6",
-    "react": "^17.0.1",
-    "react-dom": "^17.0.1",
-    "styled-components": "^5.2.1"
+    "glob": "^7.1.6"
   }
 }

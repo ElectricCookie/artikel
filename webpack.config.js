@@ -40,12 +40,7 @@ const staticConfig = {
             presets: ["@babel/preset-env","@babel/react"]
           }
         },
-      },
-      {
-        exclude: /\.(js|css|html|json|svg)$/i,
-        loader: "file-loader",
-        options: { name: "[name].[hash:4].[ext]" },
-      },
+      }
     ],
   },
 };

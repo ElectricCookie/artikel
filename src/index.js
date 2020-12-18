@@ -19,10 +19,6 @@ program
   .option("-F, --force", "force a re-render", "false")
 
   .action((files, options) => {
-    console.log(process.argv);
-    console.log(files);
-    console.log(options.output);
-    console.log(options.force);
 
     const OUT_DIR = path.join(process.cwd(), options.output);
 
