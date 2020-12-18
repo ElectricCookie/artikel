@@ -1,0 +1,54 @@
+{
+  "name": "artikel",
+  "version": "0.0.1",
+  "description": "",
+  "main": "index.js",
+  "bin": {
+    "artikel": "index.js"
+  },
+  "scripts": {
+    "build": "webpack -p",
+    "html": "node ./dist/render.js",
+    "postinstall": "npm run build",
+    "clear": "rm -rf ./dist/",
+    "render": "npm run build && npm run html && npm run clear"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ElectricCookie/artikel.git"
+  },
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/ElectricCookie/artikel/issues"
+  },
+  "homepage": "https://github.com/ElectricCookie/artikel#readme",
+  "dependencies": {
+    "@babel/cli": "^7.12.1",
+    "@babel/core": "^7.12.3",
+    "@babel/preset-env": "^7.12.1",
+    "@babel/preset-react": "^7.12.5",
+    "autoprefixer": "^9.3.1",
+    "babel-loader": "^8.2.1",
+    "chalk": "^4.1.0",
+    "chokidar": "^3.4.3",
+    "clipboardy": "^2.3.0",
+    "css-loader": "^1.0.1",
+    "express": "^4.17.1",
+    "file-loader": "^6.2.0",
+    "glob": "^7.1.6",
+    "html-minifier": "^4.0.0",
+    "mini-css-extract-plugin": "^0.4.5",
+    "postcss-import": "^12.0.1",
+    "postcss-loader": "^3.0.0",
+    "postcss-preset-env": "^6.4.0",
+    "postcss-url": "^8.0.0",
+    "react": "^17.0.1",
+    "react-dom": "^17.0.1",
+    "style-loader": "^0.23.1",
+    "styled-components": "^5.2.1",
+    "webpack": "^4.26.0",
+    "webpack-cli": "^3.1.2",
+    "ws": "^7.4.0"
+  }
+}
